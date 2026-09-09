@@ -19,8 +19,9 @@ type Handler struct {
 	credentialsStore auth.CredentialsStore
 	accountInfo      *models.Account
 	// EndCallDoor is the {place, access control} whose "Открыть" button and HA
-	// snippet go through /api/.../open-and-end-call (SIP intercom). Zero = none.
-	EndCallDoor [2]int
+	// snippet go through /api/.../open-and-end-call (SIP intercom). Nil or zero = none;
+	// a func because the intercom may be auto-detected after login.
+	EndCallDoor func() [2]int
 
 	TemplateFs embed.FS
 }

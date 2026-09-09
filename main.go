@@ -100,9 +100,7 @@ func main() {
 	defer stop()
 	integrations := startIntegrations(ctx, domruAPI, credentialsFile, logger)
 	integrations.routes(http.DefaultServeMux)
-	if integrations.controller != nil {
-		handlers.EndCallDoor = [2]int{integrations.place, integrations.control}
-	}
+	handlers.EndCallDoor = integrations.Door
 
 	upstream, err := url.Parse(constants.BaseURL)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moleus/domru/pkg/callcontrol"
@@ -22,6 +23,7 @@ import (
 )
 
 type integrations struct {
+	mu                      sync.RWMutex // guards every field below; start() fills them once
 	sip                     *sipclient.Client
 	telegram                *telegram.Bot
 	webhook                 *webhook.Sender
@@ -36,18 +38,105 @@ func startIntegrations(ctx context.Context, api *domru.APIWrapper, credentials s
 	viper.SetDefault("sip-end-mode", "off")
 	viper.SetDefault("sip-rtp-first", 20000)
 	viper.SetDefault("sip-rtp-last", 20100)
-	x := &integrations{place: viper.GetInt("sip-place-id"), control: viper.GetInt("sip-access-control-id")}
+	x := &integrations{}
 	enabled := viper.GetBool("sip-enabled")
 	token := viper.GetString("telegram-bot-token")
 	chat := viper.GetString("telegram-chat-id")
 	if !enabled && token == "" && chat == "" {
 		return x
 	}
-	if x.place <= 0 || x.control <= 0 {
-		x.sipError = "Set DOMRU_SIP_PLACE_ID and DOMRU_SIP_ACCESS_CONTROL_ID"
+	place, control := viper.GetInt("sip-place-id"), viper.GetInt("sip-access-control-id")
+	switch {
+	case place > 0 && control > 0:
+		x.start(ctx, api, credentials, logger, place, control)
+	case place > 0 || control > 0:
+		x.sipError = "Set both DOMRU_SIP_PLACE_ID and DOMRU_SIP_ACCESS_CONTROL_ID, or neither to auto-detect"
 		logger.Error(x.sipError)
-		return x
+	default:
+		x.sipError = "Detecting the intercom; log in at /login if this persists"
+		go x.detect(ctx, api, credentials, logger)
 	}
+	return x
+}
+
+type intercom struct {
+	place, control int
+	name           string
+}
+
+// chooseIntercom picks the only intercom of the account; any other count needs
+// DOMRU_SIP_PLACE_ID/DOMRU_SIP_ACCESS_CONTROL_ID. retry says whether waiting may help.
+func chooseIntercom(found []intercom) (pick intercom, problem string, retry bool) {
+	switch len(found) {
+	case 1:
+		return found[0], "", false
+	case 0:
+		return intercom{}, "No intercom found for this account; set DOMRU_SIP_PLACE_ID and DOMRU_SIP_ACCESS_CONTROL_ID", true
+	default:
+		return intercom{}, "Several intercoms found; set DOMRU_SIP_PLACE_ID and DOMRU_SIP_ACCESS_CONTROL_ID (candidates are in the log)", false
+	}
+}
+
+func findIntercoms(api *domru.APIWrapper) ([]intercom, error) {
+	places, err := api.RequestPlaces()
+	if err != nil {
+		return nil, err
+	}
+	var found []intercom
+	for _, d := range places.Data {
+		controls, err := api.RequestAccessControls(d.Place.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, ac := range controls.Data {
+			found = append(found, intercom{place: d.Place.ID, control: ac.ID, name: ac.Name})
+		}
+	}
+	return found, nil
+}
+
+// detect resolves the intercom from the account and starts the integrations.
+// Before the first login the API rejects us, so it retries every 30 s.
+func (x *integrations) detect(ctx context.Context, api *domru.APIWrapper, credentials string, logger *slog.Logger) {
+	for {
+		found, err := findIntercoms(api)
+		problem, retry := "Cannot list intercoms yet; log in at /login or set DOMRU_SIP_PLACE_ID and DOMRU_SIP_ACCESS_CONTROL_ID", true
+		if err == nil {
+			var pick intercom
+			pick, problem, retry = chooseIntercom(found)
+			if problem == "" {
+				logger.Info("Intercom detected", "place", pick.place, "accessControl", pick.control, "name", pick.name)
+				x.start(ctx, api, credentials, logger, pick.place, pick.control)
+				return
+			}
+			for _, f := range found {
+				logger.Warn("Intercom candidate", "place", f.place, "accessControl", f.control, "name", f.name)
+			}
+		}
+		x.mu.Lock()
+		x.sipError = problem
+		x.mu.Unlock()
+		if !retry {
+			logger.Error(problem)
+			return
+		}
+		logger.Debug(problem)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+	}
+}
+
+// start wires SIP, Telegram and webhook for one intercom. Called once.
+func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credentials string, logger *slog.Logger, place, control int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.place, x.control, x.sipError = place, control, ""
+	enabled := viper.GetBool("sip-enabled")
+	token := viper.GetString("telegram-bot-token")
+	chat := viper.GetString("telegram-chat-id")
 	x.controller = &callcontrol.Controller{Mode: "off", OpenDoor: func(ctx context.Context) error { return api.OpenIntercom(ctx, x.place, x.control) }}
 	if enabled {
 		id, err := sipclient.InstallationID(filepath.Join(filepath.Dir(credentials), "sip-installation-id"))
@@ -132,7 +221,16 @@ func startIntegrations(ctx context.Context, api *domru.APIWrapper, credentials s
 		}
 		go x.sip.Run(ctx)
 	}
-	return x
+}
+
+// Door is the {place, access control} pair served by open-and-end-call; zero until started.
+func (x *integrations) Door() [2]int {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	if x.controller == nil {
+		return [2]int{}
+	}
+	return [2]int{x.place, x.control}
 }
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -142,6 +240,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 func (x *integrations) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/integrations/state", func(w http.ResponseWriter, r *http.Request) {
+		x.mu.RLock()
+		defer x.mu.RUnlock()
 		sipStatus := sipclient.Status{State: "off", Calls: []sipclient.CallStatus{}}
 		if x.sip != nil {
 			sipStatus = x.sip.Status()
@@ -170,6 +270,8 @@ func (x *integrations) routes(mux *http.ServeMux) {
 		writeJSON(w, 200, map[string]any{"sip": sipStatus, "telegram": tgStatus, "webhook_error": webhookError, "end_mode": mode})
 	})
 	mux.HandleFunc("POST /api/places/{placeId}/accesscontrols/{accessControlId}/open-and-end-call", func(w http.ResponseWriter, r *http.Request) {
+		x.mu.RLock()
+		defer x.mu.RUnlock()
 		place, e1 := strconv.Atoi(r.PathValue("placeId"))
 		control, e2 := strconv.Atoi(r.PathValue("accessControlId"))
 		if x.controller == nil || e1 != nil || e2 != nil || place != x.place || control != x.control {
@@ -192,6 +294,8 @@ func (x *integrations) routes(mux *http.ServeMux) {
 		writeJSON(w, status, result)
 	})
 	mux.HandleFunc("POST /api/sip/calls/{callId}/{action}", func(w http.ResponseWriter, r *http.Request) {
+		x.mu.RLock()
+		defer x.mu.RUnlock()
 		if x.sip == nil || x.diagnosticToken == "" {
 			http.NotFound(w, r)
 			return
