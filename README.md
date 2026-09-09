@@ -1,212 +1,251 @@
-**moleus/domru** is a fork of [ad/domru](https://github.com/ad/domru).
+# domru
 
-## Breaking changes
-This version **is not compatible** with ad/domru, the last compatible version is [0.1.6-dev.0](https://github.com/users/moleus/packages/container/domru/218322867?tag=0.1.6-dev.0)
+Прокси к API Дом.ру с веб-интерфейсом и уведомлениями о звонке в домофон.
 
-New code structure and API is instroduced in PR [#13](https://github.com/moleus/domru/pull/13)
+- Камеры своего и соседних подъездов, кнопка «Открыть», готовые сниппеты для
+  Home Assistant.
+- **Звонок в домофон → сообщение в Telegram с фотографией гостя и кнопкой
+  «Открыть дверь».** Нажатие открывает дверь и гасит вызов на панели.
+- Вслед за фото — видео 15 секунд до и после звонка.
+- Webhook о звонке для Home Assistant и своих сценариев.
 
-## Overview
+Форк [moleus/domru](https://github.com/moleus/domru): прокси и веб-интерфейс оттуда,
+всё про звонки добавлено здесь и предложено апстриму в
+[PR #41](https://github.com/moleus/domru/pull/41). Без настроек интеграций поведение
+не отличается от апстрима.
 
-This is a simple reverse proxy which adds authentication token to requests to domru API.
+## Установка
 
-Also provides a simple web interface to view camera snapshots and open doors
+Готовых образов нет, образ собирается из исходников. Нужен Docker.
 
-The home page lists your own intercoms and, when the operator exposes
-`/rest/v1/places/{placeId}/screen-sections`, cameras of neighboring entrances.
-Neighboring cameras are viewable only with an active Pro subscription; otherwise
-their cards say so. Cameras are matched by camera/group IDs rather than list
-order, and the "Open door" button is shown only for your own access controls
-(taken from `/rest/v1/places/{placeId}/accesscontrols` with `allowOpen`). If the
-extra endpoints fail or return 404, the basic camera list is still rendered.
-Every card comes with its own Home Assistant snippet; merge them under a single
-`camera:` / `rest_command:` section.
+### Минимум: прокси и веб-интерфейс
 
-## Run in Docker
-Find available docker images here: https://github.com/moleus/domru/pkgs/container/domru
-Please, don't use `latest` tag, because new update can break your setup
-
-```shell
-docker run --name domru --rm -p 8080:8080 -v $(pwd)/accounts.json:/share/domofon/accounts.json moleus/domru:%docker-tag%
+```bash
+git clone https://github.com/niklzz/domru && cd domru
+mkdir data
+docker build -t domru:local .
+docker run -d --name domru --restart unless-stopped -p 8080:18000 \
+  -v "$PWD/data:/data" -e DOMRU_CREDENTIALS=/data/accounts.json domru:local
 ```
 
-## In Kubernetes
-AFAIK refresh token doesn't expire, so we can store it in a secret and use it in the deployment.
+Откройте `http://<хост>:8080/` и войдите: телефон и код из SMS либо логин и пароль.
+Токены сохранятся в `data/accounts.json`, дальше прокси обновляет их сам.
 
-And we need only 2 parameters to get all other credentials: operatorId and refresh token
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: domru-secrets
-  namespace: "{{ k8s_domru_namespace }}"
-type: Opaque
-data:
-  refresh: "{{ domru_refresh | b64encode }}"
-  operator: "{{ domru_operator | b64encode }}"
-```
+### Дополнительно: оповещения в Telegram с кнопкой "Открыть дверь"
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: domru
-  namespace: "{{ k8s_domru_namespace }}"
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: domru
-  template:
-    metadata:
-      labels:
-        app: domru
-    spec:
-      containers:
-        - name: domru
-          image: "{{ domru_image_name }}:{{ domru_image_tag }}"
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 80
-          env:
-            - name: DOMRU_REFRESH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: domru-secrets
-                  key: refresh
-            - name: DOMRU_OPERATOR_ID
-              valueFrom:
-                secretKeyRef:
-                  name: domru-secrets
-                  key: operator
-            - name: DOMRU_PORT
-              value: "80"
-```
+1. Создайте бота у `@BotFather`. Напишите ему `/start` или добавьте в группу и
+   возьмите числовой `chat.id` из `https://api.telegram.org/bot<токен>/getUpdates`
+   (у групп он отрицательный). Бот должен быть отдельным: с настроенным webhook
+   он не запустится.
+2. Создайте `.env` рядом с `docker-compose.sip.yml`:
 
-## Authentication
+   ```dotenv
+   DOMRU_SIP_IP=192.168.1.10        # адрес этого хоста в локальной сети
+   DOMRU_SIP_END_MODE=answer-bye    # кнопка открывает дверь и гасит панель
+   DOMRU_TELEGRAM_BOT_TOKEN=123456:ABC...
+   DOMRU_TELEGRAM_CHAT_ID=-1001234567890
+   DOMRU_TELEGRAM_VIDEO=true        # видео к каждому звонку; false — только фото
+   ```
 
-open http://localhost:8080/
+3. Замените контейнер (данные в `data/` остаются):
 
-1. You can use your phone number and confirmation code from sms to login
-2. You can use login and password
+   ```bash
+   docker rm -f domru
+   docker compose -f docker-compose.sip.yml up -d --build
+   ```
 
-## Custom API endpoints
+4. Проверьте `http://<хост>:8080/api/integrations/state`: `sip` и `telegram` должны
+   быть `ready`. Та же строка видна под шапкой главной. Позвоните с панели — придёт
+   фото с кнопкой.
 
-This application provides the following endpoints
+Домофон определяется сам, если у аккаунта он один. Несколько квартир или дверей —
+задайте нужную в `.env`: `DOMRU_SIP_PLACE_ID` и `DOMRU_SIP_ACCESS_CONTROL_ID` (оба
+числа есть в ссылке на снимок у карточки на главной, кандидаты перечислены в логе).
 
-| Endpoint               | Method   | Description       |
-|------------------------|----------|-------------------|
-| `/`, `pages/home.html` | GET      | Home Page         |
-| `/login`               | GET      | Login Page        |
-| `/stream/{cameraId}`   | GET      | View video stream |
-| `/login`               | GET/POST | Login             |
+Compose работает в `network_mode: host`: SIP-серверу оператора нужен прямой
+UDP-доступ к порту `5060` и диапазону `20000–20100`. Запускайте одну копию: вторая
+SIP-регистрация или второй поллер бота ломают обе. Обновление — `git pull` и снова
+`up -d --build`.
 
-## Domru API endpoints
+## Что происходит при звонке
 
-All other requests are forwarded to Domru API. A few of them:
+1. Гость нажимает кнопку на панели. Прокси зарегистрирован на домофоне как ещё одна
+   трубка, получает `INVITE` и отвечает `180 Ringing` — приложению Дом.ру это не
+   мешает.
+2. В Telegram уходит фото 1920×1080 из потока камеры с кнопкой «Открыть дверь». Если
+   снимок не удался за 6 с — текст «Снимок недоступен» с той же кнопкой.
+3. Нажатие открывает дверь и завершает звонок в режиме `DOMRU_SIP_END_MODE`. При
+   `answer-bye` панель замолкает сразу, а не через 25–30 с таймаута.
+4. Через ~20 с ответом на фото приходит видео: 15 с до звонка и 15 с после.
+5. Если задан `DOMRU_WEBHOOK_URL`, туда уходит `POST {"event":"Ringing"}`.
 
-| Endpoint                                                                    | Method | Description        |
-|-----------------------------------------------------------------------------|--------|--------------------|
-| `/rest/v1/forpost/cameras`                                                  | GET    | Get cameras list   |
-| `/rest/v1/places/{placeId}/screen-sections`                                  | GET    | Additional camera sections and subscription access |
-| `/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/snapshots`        | GET    | Camera snapshot, including authorized neighboring entrances |
-| `/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/actions`        | POST   | Open door          |
-| `/rest/v1/subscribers/profiles/finances`                                    | GET    | Get finances       |
-| `/rest/v1/subscribers/profiles`                                             | GET    | Get profile info   |
-| `/rest/v1/subscriberplaces`                                                 | GET    | Get places         |
-| `/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/videosnapshots` | GET    | Get video snapshot |
-| `/rest/v1/forpost/cameras/{cameraId}/video`                                 | GET    | Get video stream   |
-| `/auth/v2/session/refresh`                                                  | GET    | Get new token      |
-| `/rest/v1/places/{placeId}/events?allowExtentedActions=true`                | GET    | Get events         |
-| `/public/v1/operators`                                                      | GET    | List of operators  |
-| `/auth/v2/login/{phone}`                                                    | GET    | Get accounts       |
-| `/auth/v2/confirmation/{phone}`                                             | POST   | Confirm sms code   |
+Кнопка бессрочная: работает после перезапуска и всегда относится к своему звонку —
+старая кнопка из истории чата откроет дверь, но не завершит новый вызов. Успех
+молчалив, ответ `⚠️` приходит только при ошибке. Повторное и одновременное
+нажатие дверь не дёргают. Если контейнер упал посреди открытия, после рестарта
+результат помечается `unknown` и команда не повторяется. В группе кнопку может
+нажать любой участник.
 
-## Intercom call notifications: SIP, webhook, Telegram (experimental)
+Видео берётся из облачного архива Дом.ру (`/video?TS=`, нужна подписка с записью).
+Если записи на тарифе нет, прокси сам переключается на **live-буфер**: держит
+соединение с лёгким потоком камеры (960×528, ~0.45 Мбит/с) и хранит последние 20 с
+в памяти — ничего не пишется на диск. `DOMRU_TELEGRAM_VIDEO=buffer` включает буфер
+сразу, без обращения к архиву. FLV ремуксится в MP4 в памяти, без ffmpeg.
 
-Optional components, all disabled by default. They watch **one** intercom,
-notify about incoming calls and offer a door button whose call-ending mode is
-still under evaluation (`off` today: it only opens the door). Details and the
-test plan live in `decisions/003-sip-webhook-integration.md` (local file).
+## Настройки
 
-| Variable | Meaning |
-|---|---|
-| `DOMRU_SIP_ENABLED` | `true` registers a SIP client for the intercom below |
-| `DOMRU_SIP_IP`, `DOMRU_SIP_PORT` | LAN IPv4 the operator can reach and UDP port (default `5060`); use host networking |
-| `DOMRU_SIP_RTP_FIRST`, `DOMRU_SIP_RTP_LAST` | UDP range for the receive-only RTP sink (default `20000`–`20100`) |
-| `DOMRU_SIP_PLACE_ID`, `DOMRU_SIP_ACCESS_CONTROL_ID` | The intercom; verified against `/accesscontrols` on start |
-| `DOMRU_SIP_END_MODE` | `off` (default, open only), `reject` (486 after opening; does not stop the panel) or `answer-bye` (200/ACK, open, BYE; the only mode verified to silence the panel) |
-| `DOMRU_SIP_DIAGNOSTICS`, `DOMRU_SIP_DIAGNOSTICS_TOKEN` | Enable per-call actions below; token of 24+ characters |
-| `DOMRU_WEBHOOK_URL` | POST `{"event":"Ringing"}` with an `Idempotency-Key` per call |
-| `DOMRU_TELEGRAM_BOT_TOKEN`, `DOMRU_TELEGRAM_CHAT_ID` | Dedicated bot and numeric id of one private chat or group |
-| `DOMRU_TELEGRAM_VIDEO` | `true` follows every photo with a 30 s MP4 (15 s before and after the call) cut from the operator's cloud archive, falling back to an in-memory live buffer when the tariff has no recording; `buffer` uses the live buffer only |
+Любой параметр — переменная `DOMRU_ИМЯ`; базовые доступны и флагами
+(`--port`, `--credentials`, `--log-level`, `--refresh-token`, `--operator-id`).
 
-State files next to `accounts.json`: `sip-installation-id` (stable SIP device id)
-and `telegram-state.json` (button bindings, update offset, callback results;
-mode `0600`). Keep the directory on a persistent volume so old buttons survive
-restarts. See `docker-compose.sip.yml` for a host-network example.
-
-Endpoints:
-
-| Endpoint | Method | Description |
+| Переменная | По умолчанию | Смысл |
 |---|---|---|
-| `/api/integrations/state` | GET | SIP, Telegram and webhook status without credentials |
-| `/api/places/{placeId}/accesscontrols/{accessControlId}/open-and-end-call` | POST | Open the configured intercom and end the current call in the selected mode; without a call it just opens. The home page button and HA snippet of that intercom use it automatically. `409` while another opening runs |
-| `/api/sip/calls/{callId}/reject`, `/api/sip/calls/{callId}/answer-bye` | POST | Diagnostics only, `Authorization: Bearer <token>` |
+| `DOMRU_PORT` | `18000` | Порт HTTP |
+| `DOMRU_CREDENTIALS` | `/share/domofon/accounts.json` | Файл токенов; в его каталоге лежат и файлы состояния |
+| `DOMRU_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `DOMRU_REFRESH_TOKEN`, `DOMRU_OPERATOR_ID` | — | Начальные учётные данные, только парой; при старте перезаписывают `accounts.json` |
+| `DOMRU_SIP_ENABLED` | `false` | Регистрировать SIP-клиент (в `docker-compose.sip.yml` уже `true`) |
+| `DOMRU_SIP_IP` | — | IPv4 хоста в LAN, до которого доходит SIP-сервер оператора |
+| `DOMRU_SIP_PORT` | `5060` | Локальный UDP-порт SIP |
+| `DOMRU_SIP_RTP_FIRST`, `DOMRU_SIP_RTP_LAST` | `20000`, `20100` | UDP-диапазон приёма RTP; звук отбрасывается |
+| `DOMRU_SIP_PLACE_ID`, `DOMRU_SIP_ACCESS_CONTROL_ID` | автоопределение | Домофон. Без них берётся единственный домофон аккаунта; задавать только оба |
+| `DOMRU_SIP_END_MODE` | `off` | Что делать со звонком при открытии двери, см. ниже |
+| `DOMRU_SIP_DIAGNOSTICS`, `DOMRU_SIP_DIAGNOSTICS_TOKEN` | `false`, — | Отладочные `POST /api/sip/calls/{id}/{reject\|answer-bye}` за Bearer-токеном от 24 символов |
+| `DOMRU_TELEGRAM_BOT_TOKEN`, `DOMRU_TELEGRAM_CHAT_ID` | — | Бот и числовой ID личного чата или группы |
+| `DOMRU_TELEGRAM_VIDEO` | `false` | `true` — архив с переходом на live-буфер; `buffer` — только буфер |
+| `DOMRU_WEBHOOK_URL` | — | `http`/`https` адрес для `POST {"event":"Ringing"}` |
 
-The response of `open-and-end-call` carries two fields: `opening`
-(`accepted`, `unknown`, `failed`, `busy`) and `call` (`off`, `ended`, `absent`,
-`failed`, `not_attempted`). `accepted` means the operator API took the command,
-not that the door physically opened. The command is never retried on its own.
+**Режим завершения звонка.** `off` — только открыть дверь, панель звонит до таймаута.
+`reject` — открыть и ответить `486`: завершает только нашу ветку, панель звонит
+дальше. `answer-bye` — ответить `200`/`ACK`, открыть, послать `BYE`: единственный
+режим, который гасит панель, проверен на живом домофоне. По умолчанию `off`, потому
+что молча гасить звонок, который слышат другие трубки, не стоит без явного согласия.
 
-Telegram setup: create a bot with `@BotFather`, then either send it `/start`
-in a private chat or add it to a group. Get the numeric chat id from
-`https://api.telegram.org/bot<token>/getUpdates` after a message in that chat
-(group ids are negative). In a group every member may press the button. The
-bot uses long polling, so a bot with a configured webhook is rejected; use a
-dedicated bot. A missing snapshot yields a text notification with the same
-button. The button never expires and may be pressed again later; it always
-refers to the call it was sent for and never ends a newer call.
+**Когда стартуют интеграции.** Если `DOMRU_SIP_ENABLED` выключен и Telegram не
+задан, ничего не запускается. Иначе прокси ждёт первого входа на `/login`,
+определяет домофон (повтор каждые 30 с) и поднимает SIP, Telegram и webhook. Причина
+ожидания видна в `/api/integrations/state`.
 
-With `DOMRU_TELEGRAM_VIDEO=true` the bot also replies to the photo with a short
-clip about 15–20 s after the call. Nothing is written to disk: the operator
-keeps a continuous cloud recording per camera and plays it back from any
-moment (`/video?TS=<unix seconds>`), so the seconds before the call are
-already there. Tariffs without recording answer such a request with the live
-stream instead; the bot detects that (once at startup and on every call) and
-switches for good to a **live buffer**: a permanent connection to the camera's
-light stream (960×528) keeps the last 20 s of frames in RAM (~1 MiB, no
-decoding) and the clip is cut from it, including the seconds before the ring.
-The call that triggered the switch still gets the seconds after it.
-`DOMRU_TELEGRAM_VIDEO=buffer` skips the archive entirely. The buffer costs about
-0.45 Mbit/s (~4 GB a day) around the clock. Either way the FLV is remuxed to MP4 in memory
-(`github.com/yapingcat/gomedia`, pure Go). Clip errors only show up in
-`/api/integrations/state`; the photo and the button are unaffected.
+**Файлы состояния** в каталоге `DOMRU_CREDENTIALS`: `accounts.json` (токены),
+`sip-installation-id` (постоянный ID SIP-устройства), `telegram-state.json`
+(привязки кнопок к звонкам, offset, результаты нажатий). Пишутся атомарно, права
+`0600`. Держите каталог на постоянном томе, иначе старые кнопки перестанут работать.
 
-## 🤝&nbsp; Found a bug? Missing a specific feature?
+## Webhook
 
-Feel free to **file a new issue** with a respective title and description on
-the [moleus/domru](https://github.com/moleus/domru/issues) repository. If you already found a solution to your problem,
-**we would love to review your pull request**!
+`POST` на `DOMRU_WEBHOOK_URL`, тело `{"event":"Ringing"}`, заголовок
+`Idempotency-Key: <ID звонка>`. До трёх попыток, повтор только на `429` и `5xx`.
+Последняя ошибка — в `webhook_error` статуса.
 
-## Development
-
-Setup pre-commit hooks
-```bash
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
+```yaml
+# Home Assistant; DOMRU_WEBHOOK_URL=http://homeassistant:8123/api/webhook/domru-ring
+automation:
+  - alias: Intercom ringing
+    trigger:
+      - platform: webhook
+        webhook_id: domru-ring
+        allowed_methods: [POST]
+        local_only: true
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          message: Звонок в домофон
 ```
 
-setup dependencies
-```bash
-go install
-go mod tidy
+## Веб-интерфейс и Home Assistant
+
+Главная показывает карточки камер в трёх секциях: **Мои домофоны** (кнопка «Открыть»
+только здесь и только при `allowOpen` из `/accesscontrols`), **Соседний подъезд**
+(из `screen-sections`, смотреть можно с подпиской Pro) и **Другие камеры**. Камеры
+сопоставляются по ID, а не по порядку; если дополнительные эндпоинты недоступны,
+базовый список всё равно рендерится.
+
+На каждой карточке — ссылка на поток `/stream/{cameraId}`, снимок и сниппет Home
+Assistant: `rest_command` для открытия и `camera: platform: generic` с
+`still_image_url`/`stream_source`. Сниппеты разных карточек сливайте под общими
+ключами. Для домофона, за которым следит SIP, кнопка и `rest_command` идут через
+`open-and-end-call` — дверь открывается и звонок завершается, как из Telegram.
+
+Под шапкой — строка статуса интеграций, обновляется раз в 10 с и скрыта, когда они
+выключены.
+
+## HTTP API
+
+| Маршрут | Метод | Что делает |
+|---|---|---|
+| `/` | GET | `301` на `/pages/home.html` |
+| `/pages/home.html` | GET | Главная; без токена — `303` на `/login` |
+| `/login` | GET, POST | Форма входа; POST телефона → список адресов |
+| `/login/address` | GET | Выбор адреса, запрос SMS |
+| `/sms` | POST | Код из SMS |
+| `/loginWithPassword` | POST | Вход по логину и паролю |
+| `/stream/{cameraId}` | GET | `302` на URL потока |
+| `/api/integrations/state` | GET | Статус SIP, Telegram, webhook, режим завершения. Без авторизации и секретов |
+| `/api/places/{placeId}/accesscontrols/{accessControlId}/open-and-end-call` | POST | Открыть домофон и завершить текущий звонок; без звонка просто открывает. Только для отслеживаемого домофона (`404`), только same-origin (`403`), таймаут 20 с |
+| `/api/sip/calls/{callId}/reject`, `…/answer-bye` | POST | Диагностика, `Authorization: Bearer <token>` |
+| остальное | любой | Проксируется в API Дом.ру с подстановкой токена |
+
+Ответ `open-and-end-call`: `opening` — `accepted` (API принял команду, это не
+датчик двери), `unknown` (сетевая ошибка после отправки, повтора не будет),
+`failed`, `busy` (уже идёт открытие, HTTP `409`); `call` — `off`, `ended`, `absent`,
+`failed`, `not_attempted`. HTTP `200` при `accepted`, `409` при `busy`, иначе `502`.
+
+`/api/integrations/state`:
+
+```json
+{
+  "sip":      {"state": "ready", "calls": [{"id": "…", "state": "ringing", "started": "…"}]},
+  "telegram": {"state": "ready"},
+  "webhook_error": "",
+  "end_mode": "answer-bye"
+}
 ```
 
-### Application architecture
+Состояния SIP: `off`, `waiting_auth`, `registering`, `ready`, `error`; Telegram:
+`off`, `starting`, `ready`, `error`. Поле `error` появляется только при ошибке и не
+содержит токенов и URL.
 
-![Architecture](img/architecture.svg)
+Полезные эндпоинты Дом.ру, проксируемые как есть:
 
-## 📘&nbsp; License
+| Эндпоинт | Метод | Описание |
+|---|---|---|
+| `/rest/v1/subscriberplaces` | GET | Адреса |
+| `/rest/v1/places/{placeId}/accesscontrols` | GET | Свои домофоны с `allowOpen` |
+| `/rest/v1/places/{placeId}/screen-sections` | GET | Секции камер и доступ по подписке |
+| `/rest/v1/places/{placeId}/accesscontrols/{id}/actions` | POST | Открыть дверь: `{"name":"accessControlOpen"}` |
+| `/rest/v1/places/{placeId}/accesscontrols/{id}/snapshots` | GET | Миниатюра 500×281; `width`/`height` только апскейлят |
+| `/rest/v1/forpost/cameras` | GET | Список камер |
+| `/rest/v1/forpost/cameras/{cameraId}/snapshots?width=1920&height=1080` | GET | Кадр из потока в нативном разрешении |
+| `/rest/v1/forpost/cameras/{cameraId}/video` | GET | URL потока; `?TS=<unix>` — архив, если есть запись |
+| `/rest/v1/places/{placeId}/events?allowExtentedActions=true` | GET | События |
+| `/rest/v1/subscribers/profiles`, `…/profiles/finances` | GET | Профиль, баланс |
+| `/auth/v2/session/refresh` | GET | Обновление токена |
 
-Released under the terms of the [MIT License](LICENSE).
+## Разработка
+
+Go 1.22, шаблоны через `go:embed`, статический бинарник.
+
+```bash
+gofmt -l . && go vet ./... && go test ./...
+go test -race ./...
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o domru .
+```
+
+- `pkg/sipclient` — SIP на [sipgo](https://github.com/emiago/sipgo) v0.28: REGISTER
+  с Digest, `180` на INVITE, `486` по таймауту, `200 → ACK → BYE` с recvonly G.711.
+  Ретрансмиты INVITE дедуплицируются — на звонок одно событие.
+- `pkg/callcontrol` — единственная точка открытия двери: режимы завершения,
+  `TryLock` без очереди, старый ID звонка никогда не завершает новый.
+- `pkg/telegram` — long polling, фото/видео, бессрочные кнопки, состояние на диске.
+- `pkg/webhook`, `pkg/videoclip` (архив, live-буфер, ремукс FLV→MP4 через
+  `yapingcat/gomedia`), `pkg/authorizedhttp` (Bearer, повтор после 401),
+  `pkg/atomicfile`.
+
+Грабли sipgo: обработчик INVITE обязан блокироваться на всё время звонка, иначе
+`CANCEL` получает `481`, а отложенный `486` не уходит; `ServeUDP` добавляет
+слушатель асинхронно — старт ждёт появления соединения; глобальный zerolog
+глушится, чтобы SIP-реквизиты не попали в лог.
+
+Схема ядра прокси (без интеграций): ![Architecture](img/architecture.svg)
+
+Ошибки и предложения — в [issues](https://github.com/niklzz/domru/issues).
+Лицензия — [MIT](LICENSE).
