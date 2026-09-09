@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type Buffer struct {
 	Src    *Source      // camera and stream URL resolution (shared with the archive)
 	Client *http.Client // no Timeout: the body is read for as long as the streamer allows
 	Keep   time.Duration
+	Light  atomic.Bool // LightStream=1: 960×528 at ~0.45 Mbit/s instead of 1080p at ~1.4
 
 	mu     sync.Mutex
 	frames []frame // ordered by arrival; frames[0] is a keyframe
@@ -61,9 +63,11 @@ func (b *Buffer) stream(ctx context.Context) (got bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	// ponytail: the light stream (960×528, ~0.45 Mbit/s) runs around the clock;
-	// LightStream=0 is 1080p at ~1.4 Mbit/s, three times the traffic.
-	streamURL, err := b.Src.URL(camera, url.Values{"LightStream": {"1"}, "Format": {"H264"}})
+	light := "0"
+	if b.Light.Load() {
+		light = "1"
+	}
+	streamURL, err := b.Src.URL(camera, url.Values{"LightStream": {light}, "Format": {"H264"}})
 	if err != nil {
 		return false, errors.New("cannot get live URL")
 	}
@@ -176,6 +180,20 @@ func (b *Buffer) Clip(ctx context.Context, start time.Time, d time.Duration) ([]
 func (b *Buffer) setStatus(s string) {
 	b.mu.Lock()
 	b.status = s
+	b.mu.Unlock()
+}
+
+// Status is the last connection state, e.g. "connected" or the reconnect reason.
+func (b *Buffer) Status() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.status
+}
+
+// reset drops the frames after Run returns so a restart never mixes streams.
+func (b *Buffer) reset() {
+	b.mu.Lock()
+	b.frames, b.offset, b.last, b.status = nil, 0, 0, "stopped"
 	b.mu.Unlock()
 }
 

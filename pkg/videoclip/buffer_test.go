@@ -145,7 +145,7 @@ func TestBufferStreamFillsFrames(t *testing.T) {
 	}
 }
 
-func TestAutoFallsBackToBufferOnLive(t *testing.T) {
+func TestSwitchFallsBackToBufferOnLive(t *testing.T) {
 	var archiveHits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("TS") != "" {
@@ -161,7 +161,8 @@ func TestAutoFallsBackToBufferOnLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a := &Auto{Archive: src, Buffer: &Buffer{Src: src, Client: srv.Client(), Keep: 20 * time.Second}, Ctx: ctx}
+	a := &Switch{Archive: src, Buffer: &Buffer{Src: src, Client: srv.Client(), Keep: 20 * time.Second}, Ctx: ctx}
+	a.s, a.archive = Settings{Mode: "archive"}, true // as if the start-up probe had found recordings
 	// Like a real call: the window still runs when the archive turns out to be
 	// live, the buffer started inside Clip collects the tail of the window.
 	clip, err := a.Clip(ctx, time.Now().Add(-30*time.Second), 31*time.Second)
@@ -171,8 +172,8 @@ func TestAutoFallsBackToBufferOnLive(t *testing.T) {
 	if frames, _, _ := demux(t, clip); frames == 0 {
 		t.Fatal("empty clip from buffer")
 	}
-	if !a.live || atomic.LoadInt32(&archiveHits) != 1 {
-		t.Fatalf("live=%v archive hits=%d", a.live, archiveHits)
+	if st := a.State(); st.Mode != "live" || st.Archive || atomic.LoadInt32(&archiveHits) != 1 {
+		t.Fatalf("state=%+v archive hits=%d", st, archiveHits)
 	}
 	if _, err := a.Clip(ctx, time.Now().Add(-30*time.Second), 30*time.Second); err != nil {
 		t.Fatal(err)
@@ -182,7 +183,7 @@ func TestAutoFallsBackToBufferOnLive(t *testing.T) {
 	}
 }
 
-func TestAutoKeepsArchiveOnNetworkError(t *testing.T) {
+func TestSwitchKeepsArchiveOnNetworkError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -192,9 +193,10 @@ func TestAutoKeepsArchiveOnNetworkError(t *testing.T) {
 		URL:    func(camera string, q url.Values) (string, error) { return srv.URL + "/v?" + q.Encode(), nil },
 		Client: srv.Client(),
 	}
-	a := &Auto{Archive: src, Buffer: &Buffer{Src: src, Client: srv.Client(), Keep: 20 * time.Second}, Ctx: context.Background()}
+	a := &Switch{Archive: src, Buffer: &Buffer{Src: src, Client: srv.Client(), Keep: 20 * time.Second}}
+	a.s, a.archive = Settings{Mode: "archive"}, true
 	_, err := a.Clip(context.Background(), time.Now().Add(-30*time.Second), 30*time.Second)
-	if err == nil || errors.Is(err, errLive) || a.live {
-		t.Fatalf("archive must stay: err=%v live=%v", err, a.live)
+	if st := a.State(); err == nil || errors.Is(err, errLive) || st.Mode != "archive" || !st.Archive {
+		t.Fatalf("archive must stay: err=%v state=%+v", err, st)
 	}
 }

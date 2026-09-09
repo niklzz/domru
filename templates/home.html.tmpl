@@ -77,7 +77,20 @@
 </head>
 <body>
 <main id="wrapper">
-    <p id="integrations" hidden></p>
+    <p id="integrations" hidden><span id="integrations-text"></span><span id="video-controls" hidden>
+        · Видео в Telegram:
+        <span style="display: inline-flex; flex-direction: column; gap: .25em; vertical-align: top;">
+            <select id="video-mode" onchange="setVideo()">
+                <option value="off">выкл</option>
+                <option value="archive">архив</option>
+                <option value="live">онлайн</option>
+            </select>
+            <select id="video-light" onchange="setVideo()">
+                <option value="0">1920×1080</option>
+                <option value="1">960×528</option>
+            </select>
+        </span>
+        <span id="video-error"></span></span></p>
     {{ if .LoginError }}
     <div class="alert alert-danger" role="alert">{{ .LoginError }}</div>
     {{ end }}
@@ -154,9 +167,31 @@ function showIntegrations() {
         let text = part('SIP', s.sip) + ' · ' + part('Telegram', s.telegram) + ' · Завершение звонка: ' + s.end_mode;
         if (calls.length) text += ' · Звонок: ' + calls.map(c => c.state).join(', ');
         if (s.webhook_error) text += ' · Webhook: ' + s.webhook_error;
-        p.textContent = text;
+        document.getElementById('integrations-text').textContent = text;
+        showVideo(s.video);
         p.hidden = false;
     }).catch(() => {});
+}
+// The archive option needs a subscription; the stream size matters only for live.
+function showVideo(v) {
+    const box = document.getElementById('video-controls');
+    box.hidden = !v;
+    if (!v) return;
+    const mode = document.getElementById('video-mode'), light = document.getElementById('video-light');
+    const archive = mode.querySelector('option[value=archive]');
+    archive.disabled = !v.archive;
+    archive.title = v.archive ? '' : 'Нужна подписка Дом.ру с записью';
+    if (document.activeElement !== mode) mode.value = v.mode || 'off';
+    if (document.activeElement !== light) light.value = v.light ? '1' : '0';
+    light.hidden = v.mode !== 'live';
+    document.getElementById('video-error').textContent = v.mode === 'live' && v.buffer && v.buffer !== 'connected' ? ' (' + v.buffer + ')' : '';
+}
+function setVideo() {
+    const body = {mode: document.getElementById('video-mode').value, light: document.getElementById('video-light').value === '1'};
+    document.getElementById('video-error').textContent = ' …';
+    fetch('/api/video', {method: 'POST', headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+        .then(r => r.json().then(v => { if (!r.ok) throw new Error(v.error); showVideo(v); }))
+        .catch(e => { document.getElementById('video-error').textContent = ' ⚠️ ' + e.message; setTimeout(showIntegrations, 3000); });
 }
 showIntegrations();
 setInterval(showIntegrations, 10000);

@@ -4,15 +4,18 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/moleus/domru/pkg/atomicfile"
 	"github.com/moleus/domru/pkg/callcontrol"
 	"github.com/moleus/domru/pkg/domru"
 	"github.com/moleus/domru/pkg/sipclient"
@@ -27,6 +30,7 @@ type integrations struct {
 	sip                     *sipclient.Client
 	telegram                *telegram.Bot
 	webhook                 *webhook.Sender
+	video                   *videoclip.Switch
 	controller              *callcontrol.Controller
 	place, control          int
 	sipError, telegramError string
@@ -179,25 +183,20 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 		if x.telegram != nil {
 			x.telegram.Snapshot = func(ctx context.Context) ([]byte, error) { return api.IntercomSnapshot(ctx, x.place, x.control) }
 			x.telegram.Open = x.controller.Open
-			if mode := strings.ToLower(viper.GetString("telegram-video")); mode != "" && mode != "false" {
-				archive := &videoclip.Source{
-					Camera: func(ctx context.Context) (string, error) { return api.IntercomCameraID(ctx, x.place, x.control) },
-					URL:    api.GetStreamURL,
-					Client: &http.Client{Timeout: 90 * time.Second},
-				}
-				buffer := &videoclip.Buffer{Src: archive, Client: &http.Client{}, Keep: 20 * time.Second}
-				switch mode {
-				case "true": // cloud archive, live buffer once the tariff turns out to have no recording
-					auto := &videoclip.Auto{Archive: archive, Buffer: buffer, Ctx: ctx}
-					go auto.Probe(ctx)
-					x.telegram.Video = auto.Clip
-				case "buffer": // live buffer only, no archive requests at all
-					go buffer.Run(ctx)
-					x.telegram.Video = buffer.Clip
-				default:
-					logger.Error("Invalid DOMRU_TELEGRAM_VIDEO: use true or buffer")
-				}
+			archive := &videoclip.Source{
+				Camera: func(ctx context.Context) (string, error) { return api.IntercomCameraID(ctx, x.place, x.control) },
+				URL:    api.GetStreamURL,
+				Client: &http.Client{Timeout: 90 * time.Second},
 			}
+			settingsFile := filepath.Join(filepath.Dir(credentials), "video-settings.json")
+			x.video = &videoclip.Switch{
+				Archive: archive,
+				Buffer:  &videoclip.Buffer{Src: archive, Client: &http.Client{}, Keep: 20 * time.Second},
+				Ctx:     ctx,
+				Save:    func(s videoclip.Settings) error { return atomicfile.WriteJSON(settingsFile, s) },
+			}
+			x.telegram.Video = x.video.Clip
+			go x.video.Start(ctx, videoSettings(settingsFile, viper.GetString("telegram-video"), logger))
 			go x.telegram.Run(ctx)
 		}
 	}
@@ -221,6 +220,27 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 		}
 		go x.sip.Run(ctx)
 	}
+}
+
+// videoSettings loads the choice made on the home page; DOMRU_TELEGRAM_VIDEO
+// is only the default for a fresh state directory.
+func videoSettings(file, env string, logger *slog.Logger) videoclip.Settings {
+	var s videoclip.Settings
+	if data, err := os.ReadFile(file); err == nil && json.Unmarshal(data, &s) == nil {
+		return s
+	}
+	switch strings.ToLower(env) {
+	case "true", "archive":
+		s.Mode = "archive"
+	case "buffer", "live":
+		s.Mode = "live"
+	case "", "false", "off":
+		s.Mode = "off"
+	default:
+		logger.Error("Invalid DOMRU_TELEGRAM_VIDEO: use true, buffer or false")
+		s.Mode = "off"
+	}
+	return s
 }
 
 // Door is the {place, access control} pair served by open-and-end-call; zero until started.
@@ -267,7 +287,41 @@ func (x *integrations) routes(mux *http.ServeMux) {
 		if x.controller != nil {
 			mode = x.controller.Mode
 		}
-		writeJSON(w, 200, map[string]any{"sip": sipStatus, "telegram": tgStatus, "webhook_error": webhookError, "end_mode": mode})
+		var video *videoclip.State
+		if x.video != nil {
+			st := x.video.State()
+			video = &st
+		}
+		writeJSON(w, 200, map[string]any{"sip": sipStatus, "telegram": tgStatus, "webhook_error": webhookError, "end_mode": mode, "video": video})
+	})
+	mux.HandleFunc("POST /api/video", func(w http.ResponseWriter, r *http.Request) {
+		x.mu.RLock()
+		video := x.video
+		x.mu.RUnlock()
+		if video == nil {
+			http.Error(w, "Telegram is not configured", 404)
+			return
+		}
+		if !sameOrigin(r) {
+			http.Error(w, "Cross-origin change is not allowed", 403)
+			return
+		}
+		var s videoclip.Settings
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&s); err != nil {
+			http.Error(w, "Bad JSON", 400)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second) // the archive probe downloads in real time
+		defer cancel()
+		if err := video.Set(ctx, s); err != nil {
+			status := 400
+			if err == videoclip.ErrNoArchive {
+				status = 409
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, video.State())
 	})
 	mux.HandleFunc("POST /api/places/{placeId}/accesscontrols/{accessControlId}/open-and-end-call", func(w http.ResponseWriter, r *http.Request) {
 		x.mu.RLock()

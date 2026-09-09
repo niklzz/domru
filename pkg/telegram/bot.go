@@ -47,7 +47,8 @@ type Bot struct {
 	Client   *http.Client
 	BaseURL  string
 	Snapshot func(context.Context) ([]byte, error)
-	// Video returns an MP4 of [start, start+d); nil disables the follow-up clip.
+	// Video returns an MP4 of [start, start+d); a nil hook or a nil, nil
+	// result (video switched off) skips the follow-up clip.
 	Video  func(ctx context.Context, start time.Time, d time.Duration) ([]byte, error)
 	Open   func(context.Context, *string) callcontrol.Result
 	mu     sync.Mutex
@@ -326,6 +327,9 @@ func (b *Bot) sendVideo(ctx context.Context, e callcontrol.Event, replyTo int64)
 	}
 	if err != nil {
 		b.set("error", "Video clip unavailable: "+err.Error())
+		return
+	}
+	if clip == nil {
 		return
 	}
 	for attempt := 0; attempt < 3; attempt++ {
