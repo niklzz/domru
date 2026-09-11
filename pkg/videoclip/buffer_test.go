@@ -95,6 +95,30 @@ func TestBufferClipCutsWindow(t *testing.T) {
 	}
 }
 
+func TestBufferClipHoldsStartWhileWaiting(t *testing.T) {
+	b := &Buffer{Keep: 20 * time.Second}
+	b.fresh = true
+	call := time.Now()
+	feed(t, b, 10*25, 500, call.Add(-10*time.Second)) // 10 s of history when the call rings
+	start := call.Add(-15 * time.Second)
+	b.hold(start, true)          // Clip is now waiting for the window to pass
+	feed(t, b, 17*25, 500, call) // 15 s after the call + latency
+	b.mu.Lock()
+	first := b.frames[0].at
+	b.mu.Unlock()
+	if first.After(call.Add(-9 * time.Second)) {
+		t.Fatalf("frames before the call were trimmed while a clip was pending: first at %s", first.Sub(call))
+	}
+	b.hold(start, false)
+	if len(b.holds) != 0 {
+		t.Fatalf("hold not released: %v", b.holds)
+	}
+	feed(t, b, 25, 500, call.Add(17*time.Second)) // next frame trims back to Keep
+	if b.frames[0].at.Before(call.Add(-4 * time.Second)) {
+		t.Fatalf("history not trimmed after release: first at %s", b.frames[0].at.Sub(call))
+	}
+}
+
 func TestBufferReconnectStitchesDTS(t *testing.T) {
 	b := &Buffer{Keep: time.Minute}
 	b.fresh = true

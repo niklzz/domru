@@ -33,6 +33,7 @@ type Buffer struct {
 	offset uint32  // added to incoming pts/dts so segments join without a jump
 	last   uint32  // dts of the last stored frame
 	status string
+	holds  []time.Time // starts of clips still waiting for their window: never trimmed past
 }
 
 // Run streams until ctx is done, reconnecting with backoff.
@@ -120,6 +121,11 @@ func (b *Buffer) push(f frame) {
 	b.last = f.dts
 	b.frames = append(b.frames, f)
 	cut := f.at.Add(-b.Keep)
+	for _, h := range b.holds {
+		if h.Before(cut) {
+			cut = h
+		}
+	}
 	k := -1
 	for i, g := range b.frames {
 		if !g.at.Before(cut) {
@@ -139,6 +145,8 @@ func (b *Buffer) push(f frame) {
 // A partial window (reconnect inside it) still yields a shorter clip.
 func (b *Buffer) Clip(ctx context.Context, start time.Time, d time.Duration) ([]byte, error) {
 	end := start.Add(d)
+	b.hold(start, true)
+	defer b.hold(start, false)
 	if !wait(ctx, time.Until(end.Add(liveLatency))) {
 		return nil, ctx.Err()
 	}
@@ -175,6 +183,23 @@ func (b *Buffer) Clip(ctx context.Context, start time.Time, d time.Duration) ([]
 		return nil, fmt.Errorf("live buffer empty (%s)", status)
 	}
 	return mux(frames)
+}
+
+// hold pins start so push keeps the frames from it while a clip waits for
+// its window to pass; otherwise Keep would trim the seconds before the call.
+func (b *Buffer) hold(start time.Time, on bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if on {
+		b.holds = append(b.holds, start)
+		return
+	}
+	for i, h := range b.holds {
+		if h.Equal(start) {
+			b.holds = append(b.holds[:i], b.holds[i+1:]...)
+			return
+		}
+	}
 }
 
 func (b *Buffer) setStatus(s string) {
