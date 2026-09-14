@@ -110,6 +110,7 @@ SIP-регистрация или второй поллер бота ломаю�
 | `DOMRU_SIP_RTP_FIRST`, `DOMRU_SIP_RTP_LAST` | `20000`, `20100` | UDP-диапазон приёма RTP; звук отбрасывается |
 | `DOMRU_SIP_PLACE_ID`, `DOMRU_SIP_ACCESS_CONTROL_ID` | автоопределение | Домофон. Без них берётся единственный домофон аккаунта; задавать только оба |
 | `DOMRU_SIP_END_MODE` | `off` | Что делать со звонком при открытии двери, см. ниже |
+| `DOMRU_SIP_BYE_DELAY` | `2s` | В `answer-bye` — пауза между командой открытия и `BYE`: панель запирает дверь вместе с концом звонка |
 | `DOMRU_SIP_DIAGNOSTICS`, `DOMRU_SIP_DIAGNOSTICS_TOKEN` | `false`, — | Отладочные `POST /api/sip/calls/{id}/{reject\|answer-bye}` за Bearer-токеном от 24 символов |
 | `DOMRU_TELEGRAM_BOT_TOKEN`, `DOMRU_TELEGRAM_CHAT_ID` | — | Бот и числовой ID личного чата или группы |
 | `DOMRU_TELEGRAM_VIDEO` | `false` | Начальный источник ролика: `true` — архив (без записи — онлайн); `buffer` — онлайн; `false` — выкл. Дальше переключается на главной |

@@ -36,6 +36,9 @@ type Controller struct {
 	Calls    Calls
 	Mode     string
 	OpenDoor func(context.Context) error
+	// ByeDelay keeps the call up after the open command: the panel relocks the
+	// door as soon as the call ends, and a visitor needs a moment to pull it.
+	ByeDelay time.Duration
 	mu       sync.Mutex
 }
 
@@ -70,6 +73,12 @@ func (c *Controller) Open(ctx context.Context, expected *string) Result {
 		opening = "unknown"
 	}
 	if answered {
+		if err == nil && c.ByeDelay > 0 {
+			select {
+			case <-time.After(c.ByeDelay):
+			case <-ctx.Done():
+			}
+		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer cancel()
 		call = "ended"

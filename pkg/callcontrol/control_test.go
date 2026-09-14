@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
 type fakeCalls struct {
@@ -64,4 +65,13 @@ func TestSimultaneousOpenIsNotQueued(t *testing.T) {
 	require.Equal(t, "busy", c.Open(context.Background(), nil).Opening)
 	close(release)
 	<-done
+}
+func TestByeWaitsAfterOpen(t *testing.T) {
+	f := &fakeCalls{current: "call"}
+	var opened time.Time
+	c := Controller{Calls: f, Mode: "answer-bye", ByeDelay: 50 * time.Millisecond, OpenDoor: func(context.Context) error { opened = time.Now(); f.ops = append(f.ops, "open"); return nil }}
+	r := c.Open(context.Background(), nil)
+	require.Equal(t, Result{"accepted", "ended"}, r)
+	require.Equal(t, []string{"answer:call", "open", "bye:call"}, f.ops)
+	require.GreaterOrEqual(t, time.Since(opened), 50*time.Millisecond)
 }

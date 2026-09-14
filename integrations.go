@@ -40,6 +40,7 @@ type integrations struct {
 func startIntegrations(ctx context.Context, api *domru.APIWrapper, credentials string, logger *slog.Logger) *integrations {
 	viper.SetDefault("sip-port", 5060)
 	viper.SetDefault("sip-end-mode", "off")
+	viper.SetDefault("sip-bye-delay", 2*time.Second)
 	viper.SetDefault("sip-rtp-first", 20000)
 	viper.SetDefault("sip-rtp-last", 20100)
 	x := &integrations{}
@@ -141,7 +142,7 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 	enabled := viper.GetBool("sip-enabled")
 	token := viper.GetString("telegram-bot-token")
 	chat := viper.GetString("telegram-chat-id")
-	x.controller = &callcontrol.Controller{Mode: "off", OpenDoor: func(ctx context.Context) error { return api.OpenIntercom(ctx, x.place, x.control) }}
+	x.controller = &callcontrol.Controller{Mode: "off", ByeDelay: viper.GetDuration("sip-bye-delay"), OpenDoor: func(ctx context.Context) error { return api.OpenIntercom(ctx, x.place, x.control) }}
 	if enabled {
 		id, err := sipclient.InstallationID(filepath.Join(filepath.Dir(credentials), "sip-installation-id"))
 		if err == nil {
