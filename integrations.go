@@ -182,6 +182,7 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 			x.telegramError = "Cannot initialize Telegram: check configuration and state file"
 		}
 		if x.telegram != nil {
+			x.telegram.Log = logger
 			x.telegram.Snapshot = func(ctx context.Context) ([]byte, error) { return api.IntercomSnapshot(ctx, x.place, x.control) }
 			x.telegram.Open = x.controller.Open
 			archive := &videoclip.Source{

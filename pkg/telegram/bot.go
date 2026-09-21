@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -49,8 +51,10 @@ type Bot struct {
 	Snapshot func(context.Context) ([]byte, error)
 	// Video returns an MP4 of [start, start+d); a nil hook or a nil, nil
 	// result (video switched off) skips the follow-up clip.
-	Video  func(ctx context.Context, start time.Time, d time.Duration) ([]byte, error)
-	Open   func(context.Context, *string) callcontrol.Result
+	Video func(ctx context.Context, start time.Time, d time.Duration) ([]byte, error)
+	Open  func(context.Context, *string) callcontrol.Result
+	// Log receives request failures with the token-bearing URL stripped.
+	Log    *slog.Logger
 	mu     sync.Mutex
 	disk   state
 	status Status
@@ -67,7 +71,7 @@ func New(cfg Config) (*Bot, error) {
 	if cfg.Token == "" || cfg.ChatID == 0 {
 		return nil, errors.New("Telegram token and numeric chat ID required")
 	}
-	b := &Bot{cfg: cfg, BaseURL: "https://api.telegram.org", Client: &http.Client{Timeout: 40 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, queue: make(chan callcontrol.Event, 32), status: Status{State: "starting"}, disk: state{Notes: map[string]notification{}, Done: map[string]callcontrol.Result{}}}
+	b := &Bot{cfg: cfg, BaseURL: "https://api.telegram.org", Log: slog.Default(), Client: &http.Client{Timeout: 40 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, queue: make(chan callcontrol.Event, 32), status: Status{State: "starting"}, disk: state{Notes: map[string]notification{}, Done: map[string]callcontrol.Result{}}}
 	data, err := os.ReadFile(cfg.StateFile)
 	if err == nil {
 		if json.Unmarshal(data, &b.disk) != nil {
@@ -112,6 +116,12 @@ func (b *Bot) api(ctx context.Context, method string, body io.Reader, contentTyp
 	req.Header.Set("Content-Type", contentType)
 	res, err := b.Client.Do(req)
 	if err != nil {
+		// url.Error carries the URL with the token; its inner error does not.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		b.Log.Warn("Telegram request failed", "method", method, "err", err.Error())
 		return errors.New("Telegram network request failed")
 	}
 	defer res.Body.Close()
@@ -215,6 +225,7 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 	}()
 	defer func() { <-workerDone; b.set("off", "") }()
+	pollFailed := false // only the poll's own error is cleared by a later successful poll
 	for ctx.Err() == nil {
 		b.mu.Lock()
 		offset := b.disk.Offset
@@ -223,10 +234,15 @@ func (b *Bot) Run(ctx context.Context) {
 		err := b.json(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": 25, "allowed_updates": []string{"callback_query"}}, &updates)
 		if err != nil {
 			b.set("error", err.Error())
+			pollFailed = true
 			if !wait(ctx, 5*time.Second) {
 				return
 			}
 			continue
+		}
+		if pollFailed {
+			b.set("ready", "")
+			pollFailed = false
 		}
 		for _, u := range updates {
 			if ctx.Err() != nil {

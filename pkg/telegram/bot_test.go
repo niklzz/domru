@@ -408,3 +408,14 @@ func TestVideoClipRepliesToPhoto(t *testing.T) {
 	require.Equal(t, 1, f.count("sendVideo"))
 	require.NotContains(t, f.last("sendVideo"), "TOKEN\"")
 }
+
+// A transient getUpdates failure must not leave the status stuck on error.
+func TestPollErrorClearsOnNextSuccess(t *testing.T) {
+	f, srv := newFake(t)
+	e := start(t, f, srv, filepath.Join(t.TempDir(), "s.json"), nil)
+	f.mu.Lock()
+	f.fail["getUpdates"] = []int{500}
+	f.mu.Unlock()
+	require.Eventually(t, func() bool { return e.bot.Status().State == "error" }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e.bot.Status().State == "ready" }, 8*time.Second, 10*time.Millisecond)
+}
