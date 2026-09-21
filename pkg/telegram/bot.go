@@ -53,6 +53,9 @@ type Bot struct {
 	// result (video switched off) skips the follow-up clip.
 	Video func(ctx context.Context, start time.Time, d time.Duration) ([]byte, error)
 	Open  func(context.Context, *string) callcontrol.Result
+	// Player returns the URL of the live player page for the intercom camera,
+	// or "" for no button; nil skips it.
+	Player func(context.Context) string
 	// Log receives request failures with the token-bearing URL stripped.
 	Log    *slog.Logger
 	mu     sync.Mutex
@@ -121,7 +124,9 @@ func (b *Bot) api(ctx context.Context, method string, body io.Reader, contentTyp
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		b.Log.Warn("Telegram request failed", "method", method, "err", err.Error())
+		if ctx.Err() == nil { // shutdown cancels the long poll, that is not a failure
+			b.Log.Warn("Telegram request failed", "method", method, "err", err.Error())
+		}
 		return errors.New("Telegram network request failed")
 	}
 	defer res.Body.Close()
@@ -272,7 +277,16 @@ func (b *Bot) notify(ctx context.Context, e callcontrol.Event) {
 		photo = nil
 		caption += "\nСнимок недоступен"
 	}
-	keyboard := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "Открыть дверь", "callback_data": "open:" + id}}}}
+	open := []map[string]string{{"text": "🚪 Открыть дверь", "callback_data": "open:" + id}}
+	rows := [][]map[string]string{open}
+	player := ""
+	if b.Player != nil {
+		player = b.Player(ctx)
+	}
+	if player != "" {
+		rows = [][]map[string]string{{{"text": "📹 Смотреть камеру", "url": player}}, open}
+	}
+	keyboard := map[string]any{"inline_keyboard": rows}
 	var message struct {
 		ID int64 `json:"message_id"`
 	}
@@ -315,6 +329,13 @@ func (b *Bot) notify(ctx context.Context, e callcontrol.Event) {
 			if ae.code == 429 {
 				delay = time.Duration(ae.retry) * time.Second
 			} else if ae.code < 500 {
+				if player != "" {
+					// Telegram refused the link (e.g. BUTTON_URL_INVALID): the door
+					// button must still arrive, resend without the player row.
+					player = ""
+					keyboard["inline_keyboard"] = [][]map[string]string{open}
+					continue
+				}
 				return
 			}
 		}

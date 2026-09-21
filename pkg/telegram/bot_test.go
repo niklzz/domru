@@ -156,7 +156,7 @@ func TestOneNotificationWithPhotoThenTextFallback(t *testing.T) {
 	f.waitFor("sendPhoto", 1)
 	body := f.last("sendPhoto")
 	require.Contains(t, body, "Звонок в домофон: door")
-	require.Contains(t, body, `"text":"Открыть дверь"`)
+	require.Contains(t, body, `"text":"🚪 Открыть дверь"`)
 	require.Contains(t, body, "\xff\xd8\xffjpeg")
 	require.NotContains(t, body, "TOKEN\"")
 	// Snapshot failure produces a text message with the same kind of button; no stale photo.
@@ -418,4 +418,36 @@ func TestPollErrorClearsOnNextSuccess(t *testing.T) {
 	f.mu.Unlock()
 	require.Eventually(t, func() bool { return e.bot.Status().State == "error" }, 3*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool { return e.bot.Status().State == "ready" }, 8*time.Second, 10*time.Millisecond)
+}
+
+func TestPlayerButtonAboveOpenAndDroppedWhenRefused(t *testing.T) {
+	f, srv := newFake(t)
+	state := filepath.Join(t.TempDir(), "state.json")
+	bot, err := New(Config{Token: "TOKEN", ChatID: -100, PlaceID: 1, ControlID: 2, StateFile: state})
+	require.NoError(t, err)
+	bot.BaseURL = srv.URL
+	bot.Snapshot = func(context.Context) ([]byte, error) { return nil, errors.New("no snapshot") }
+	bot.Player = func(context.Context) string { return "http://nas:8080/player/9210843" }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bot.Run(ctx)
+	require.Eventually(t, func() bool { return bot.Status().State == "ready" }, 3*time.Second, 10*time.Millisecond)
+
+	bot.Enqueue(callcontrol.Event{ID: "call-1", Time: time.Now(), Name: "Подъезд"})
+	f.waitFor("sendMessage", 1)
+	body := f.last("sendMessage")
+	player, open := strings.Index(body, `"url":"http://nas:8080/player/9210843"`), strings.Index(body, "open:")
+	require.Greater(t, player, 0, body)
+	require.Greater(t, open, player, "camera button must come before the door button")
+	require.Contains(t, body, "📹 Смотреть камеру")
+	require.Contains(t, body, "🚪 Открыть дверь")
+
+	// Telegram refuses the link: the door button is resent without it, no delay.
+	f.fail["sendMessage"] = []int{400}
+	bot.Enqueue(callcontrol.Event{ID: "call-2", Time: time.Now(), Name: "Подъезд"})
+	f.waitFor("sendMessage", 3)
+	body = f.last("sendMessage")
+	require.NotContains(t, body, `"url"`)
+	require.Contains(t, body, "open:")
+	require.Equal(t, "ready", bot.Status().State)
 }

@@ -183,6 +183,16 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 		}
 		if x.telegram != nil {
 			x.telegram.Log = logger
+			if public := strings.TrimRight(viper.GetString("public-url"), "/"); public != "" {
+				// The button opens our player page; the camera is resolved per ring (one cheap GET).
+				x.telegram.Player = func(ctx context.Context) string {
+					camera, err := api.IntercomCameraID(ctx, x.place, x.control)
+					if err != nil {
+						return ""
+					}
+					return public + "/player/" + camera
+				}
+			}
 			x.telegram.Snapshot = func(ctx context.Context) ([]byte, error) { return api.IntercomSnapshot(ctx, x.place, x.control) }
 			x.telegram.Open = x.controller.Open
 			archive := &videoclip.Source{

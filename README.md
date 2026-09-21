@@ -113,6 +113,7 @@ SIP-регистрация или второй поллер бота ломаю�
 | `DOMRU_SIP_BYE_DELAY` | `2s` | В `answer-bye` — пауза между командой открытия и `BYE`: панель запирает дверь вместе с концом звонка |
 | `DOMRU_SIP_DIAGNOSTICS`, `DOMRU_SIP_DIAGNOSTICS_TOKEN` | `false`, — | Отладочные `POST /api/sip/calls/{id}/{reject\|answer-bye}` за Bearer-токеном от 24 символов |
 | `DOMRU_TELEGRAM_BOT_TOKEN`, `DOMRU_TELEGRAM_CHAT_ID` | — | Бот и числовой ID личного чата или группы |
+| `DOMRU_PUBLIC_URL` | — | Адрес этого сервера для ссылок в Telegram, например `http://192.168.0.100:8080`: добавляет кнопку «📹 Смотреть камеру» над «🚪 Открыть дверь». Локальный адрес откроется только из домашней сети |
 | `DOMRU_TELEGRAM_VIDEO` | `false` | Начальный источник ролика: `true` — архив (без записи — онлайн); `buffer` — онлайн; `false` — выкл. Дальше переключается на главной |
 | `DOMRU_WEBHOOK_URL` | — | `http`/`https` адрес для `POST {"event":"Ringing"}` |
 
