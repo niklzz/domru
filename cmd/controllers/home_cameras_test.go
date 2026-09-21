@@ -173,10 +173,14 @@ func TestHomePageLoadsSectionsAndPreservesCamerasOnFailure(t *testing.T) {
 }
 
 func renderCameraTestPage(t *testing.T, data pagemodels.HomePageData) string {
+	return renderTestTemplate(t, "home", data)
+}
+
+func renderTestTemplate(t *testing.T, name string, data interface{}) string {
 	t.Helper()
-	source, err := os.ReadFile("../../templates/home.html.tmpl")
+	source, err := os.ReadFile("../../templates/" + name + ".html.tmpl")
 	require.NoError(t, err)
-	tmpl, err := template.New("home").Funcs(getTemplateFunctions()).Parse(string(source))
+	tmpl, err := template.New(name).Funcs(getTemplateFunctions()).Parse(string(source))
 	require.NoError(t, err)
 	var buffer bytes.Buffer
 	require.NoError(t, tmpl.Execute(&buffer, data))
@@ -198,6 +202,7 @@ func TestHomeTemplateMediaPermissionsAndEscaping(t *testing.T) {
 	}})
 	require.Contains(t, html, "<img")
 	require.Contains(t, html, `href="http://localhost:8080/stream/301"`)
+	require.Contains(t, html, `href="/player/301"`)
 	require.Contains(t, html, "still_image_url:")
 	require.Contains(t, html, "stream_source:")
 	require.NotContains(t, html, "<button")
@@ -240,4 +245,19 @@ func TestHomeIgnoresLegacyNeighborDoorGrants(t *testing.T) {
 			require.Empty(t, data.CameraCards[1].SnapshotURL)
 		})
 	}
+}
+
+func TestPlayerPagePicksHLSOrMP4(t *testing.T) {
+	html := renderTestTemplate(t, "player", struct {
+		Camera int
+		Light  bool
+		AAC    bool
+	}{301, true, true})
+	require.Contains(t, html, "window.ManagedMediaSource || window.MediaSource")
+	require.Contains(t, html, "/player/301/mp4")
+	require.NotContains(t, html, "Format=HLS")
+	require.Regexp(t, `var light =\s+true\s*;`, html)
+	require.Regexp(t, `var aac =\s+true\s*;`, html)
+	require.Contains(t, html, `<video id="v" playsinline controls disableremoteplayback>`)
+	require.Contains(t, html, "v.muted = true;")
 }

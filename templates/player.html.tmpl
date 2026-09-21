@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Камера {{ .Camera }}</title>
+    <style>
+        html, body { margin: 0; height: 100%; background: #000; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+    </style>
+</head>
+<body>
+<video id="v" playsinline controls disableremoteplayback></video>
+<script>
+    var v = document.getElementById('v');
+    var light = {{ .Light }};
+    var aac = {{ .AAC }};
+    var src = '/player/{{ .Camera }}/mp4' + (light ? '?light=1' : '');
+    // The server streams fragmented MP4 (fragments every 0.5 s). Browsers do
+    // not play an endless MP4 from a plain src reliably (Safari never does), so
+    // it is fed through Media Source Extensions: ManagedMediaSource is the
+    // iPhone flavour (iOS 17.1+). Latency ends up ~2-3 s everywhere.
+    var MS = window.ManagedMediaSource || window.MediaSource;
+    var mime = 'video/mp4; codecs="avc1.4d002a, ' + (aac ? 'mp4a.40.2' : 'mp4a.6b') + '"';
+    if (MS && MS.isTypeSupported(mime)) {
+        var ms = new MS();
+        v.src = URL.createObjectURL(ms);
+        ms.addEventListener('sourceopen', function () {
+            var sb = ms.addSourceBuffer(mime);
+            var queue = [];
+            function pump() {
+                if (sb.updating || ms.readyState !== 'open') return;
+                if (queue.length) {
+                    sb.appendBuffer(queue.shift());
+                } else if (v.buffered.length && v.currentTime - v.buffered.start(0) > 30) {
+                    sb.remove(0, v.currentTime - 10); // keep the buffer small
+                }
+            }
+            sb.addEventListener('updateend', pump);
+            fetch(src).then(function (res) {
+                if (!res.ok) throw new Error(res.status);
+                var reader = res.body.getReader();
+                function read() {
+                    reader.read().then(function (chunk) {
+                        if (chunk.done) { if (ms.readyState === 'open') ms.endOfStream(); return; }
+                        queue.push(chunk.value);
+                        pump();
+                        read();
+                    });
+                }
+                read();
+            }).catch(function (e) { document.title = 'Поток недоступен (' + e.message + ')'; });
+            // Stay near the live edge if the player fell behind (tab in background).
+            setInterval(function () {
+                if (!v.buffered.length) return;
+                var end = v.buffered.end(v.buffered.length - 1);
+                if (end - v.currentTime > 3) v.currentTime = end - 1;
+            }, 1000);
+        });
+    } else {
+        v.src = src; // ponytail: no MSE at all, let the browser try progressive playback
+    }
+    // Try to start with sound; browsers allow that only after a user gesture
+    // on the site, so fall back to a muted autoplay (tap the speaker to unmute).
+    v.play().catch(function () {
+        v.muted = true;
+        v.play().catch(function () {});
+    });
+</script>
+</body>
+</html>

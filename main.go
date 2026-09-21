@@ -117,6 +117,8 @@ func main() {
 	http.HandleFunc("POST /loginWithPassword", handlers.LoginWithPasswordHandler)
 	http.HandleFunc("POST /sms", handlers.SubmitSmsCodeHandler)
 	http.HandleFunc("GET /stream/{cameraId}", handlers.StreamController)
+	http.HandleFunc("GET /player/{cameraId}", handlers.PlayerPageController)
+	http.HandleFunc("GET /player/{cameraId}/mp4", handlers.PlayerController)
 	http.HandleFunc("GET /pages/home.html", checkCredentialsMiddleware(credentialsStore, handlers.HomeHandler))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

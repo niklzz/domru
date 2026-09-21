@@ -120,6 +120,10 @@
                     <div class="table-body-cell">Видеопоток:</div>
                     <div class="table-body-cell"><a href="{{ .StreamURL }}">{{ .StreamURL }}</a></div>
                 </div>
+                <div class="resp-table-row">
+                    <div class="table-body-cell">Смотреть:</div>
+                    <div class="table-body-cell"><a href="/player/{{ .ID }}">в браузере</a> · <a href="/player/{{ .ID }}?light=1">лёгкий поток</a></div>
+                </div>
                 {{ end }}
                 {{ if .SnapshotURL }}
                 <div class="resp-table-row">

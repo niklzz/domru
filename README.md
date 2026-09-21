@@ -161,8 +161,12 @@ automation:
 сопоставляются по ID, а не по порядку; если дополнительные эндпоинты недоступны,
 базовый список всё равно рендерится.
 
-На каждой карточке — ссылка на поток `/stream/{cameraId}`, снимок и сниппет Home
-Assistant: `rest_command` для открытия и `camera: platform: generic` с
+На каждой карточке — ссылка на поток `/stream/{cameraId}` (HTTP-FLV для HA и VLC),
+ссылка «Смотреть» `/player/{cameraId}` — страница с плеером для браузера телефона
+или ПК: тот же поток на лету переупаковывается в fragmented MP4 (видео без
+перекодирования, звук MP3 → AAC через ffmpeg из образа, иначе iPhone молчит) и
+подаётся плееру через Media Source Extensions, задержка ~2–3 с; `?light=1` —
+лёгкий поток 960×528. Далее снимок и сниппет Home Assistant: `rest_command` для открытия и `camera: platform: generic` с
 `still_image_url`/`stream_source`. Сниппеты разных карточек сливайте под общими
 ключами. Для домофона, за которым следит SIP, кнопка и `rest_command` идут через
 `open-and-end-call` — дверь открывается и звонок завершается, как из Telegram.
@@ -181,6 +185,8 @@ Assistant: `rest_command` для открытия и `camera: platform: generic`
 | `/sms` | POST | Код из SMS |
 | `/loginWithPassword` | POST | Вход по логину и паролю |
 | `/stream/{cameraId}` | GET | `302` на URL потока |
+| `/player/{cameraId}` | GET | Страница с `<video>`, поток подаётся через MSE (на iPhone — ManagedMediaSource, iOS 17.1+); `?light=1` — 960×528 |
+| `/player/{cameraId}/mp4` | GET | Поток как fragmented MP4: видео H.264 как есть, звук перекодирован ffmpeg в AAC (без ffmpeg — MP3, на iPhone без звука); фрагменты 0.5 с |
 | `/api/integrations/state` | GET | Статус SIP, Telegram, webhook, режим завершения. Без авторизации и секретов |
 | `/api/places/{placeId}/accesscontrols/{accessControlId}/open-and-end-call` | POST | Открыть домофон и завершить текущий звонок; без звонка просто открывает. Только для отслеживаемого домофона (`404`), только same-origin (`403`), таймаут 20 с |
 | `/api/sip/calls/{callId}/reject`, `…/answer-bye` | POST | Диагностика, `Authorization: Bearer <token>` |
