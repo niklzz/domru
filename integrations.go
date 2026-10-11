@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -231,6 +233,40 @@ func (x *integrations) start(ctx context.Context, api *domru.APIWrapper, credent
 			}
 		}
 		go x.sip.Run(ctx)
+		if x.telegram != nil {
+			go watchSIP(ctx, x.sip.Status, x.telegram.Alert, 30*time.Second, 5*time.Minute)
+		}
+	}
+}
+
+// watchSIP tells the chat when SIP stays unregistered for `after` and when it
+// is back: otherwise a silent bot looks the same as nobody ringing.
+func watchSIP(ctx context.Context, status func() sipclient.Status, send func(context.Context, string) error, every, after time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	var down time.Time
+	alerted := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		st := status()
+		switch {
+		case st.State == "ready":
+			// ponytail: a failed recovery message is retried on the next tick while SIP stays up.
+			if alerted && send(ctx, fmt.Sprintf("✅ Домофон снова на связи (не было ~%d мин)", int(time.Since(down).Minutes()))) == nil {
+				alerted = false
+			}
+			if !alerted {
+				down = time.Time{}
+			}
+		case down.IsZero():
+			down = time.Now()
+		case !alerted && time.Since(down) >= after:
+			alerted = send(ctx, "⚠️ Домофон не на связи, звонки в Telegram не придут.\nПричина: "+cmp.Or(st.Error, st.State)) == nil
+		}
 	}
 }
 

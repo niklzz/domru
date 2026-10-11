@@ -153,6 +153,11 @@ func (b *Bot) api(ctx context.Context, method string, body io.Reader, contentTyp
 	}
 	return nil
 }
+
+// Alert sends a plain service message to the chat.
+func (b *Bot) Alert(ctx context.Context, text string) error {
+	return b.json(ctx, "sendMessage", map[string]any{"chat_id": b.cfg.ChatID, "text": text}, nil)
+}
 func (b *Bot) json(ctx context.Context, method string, payload any, out any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
