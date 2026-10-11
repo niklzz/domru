@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -225,4 +226,45 @@ func TestSDPAndIdentity(t *testing.T) {
 		conn.Close()
 		sink.Close()
 	}
+}
+
+// An API outage must not unregister us: on 503 the cached credentials are
+// reused without Fetch; only a rejection (403) asks the API again.
+func TestRegisterSurvivesAPIOutage(t *testing.T) {
+	retryDelay = 50 * time.Millisecond
+	t.Cleanup(func() { retryDelay = 5 * time.Second })
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	require.NoError(t, err)
+	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	require.NoError(t, err)
+	addr := local.LocalAddr().(*net.UDPAddr)
+	local.Close()
+	c, err := New(Config{IP: "127.0.0.1", Port: addr.Port, Installation: uuid.NewString()})
+	require.NoError(t, err)
+	var fetches atomic.Int32
+	c.Fetch = func(context.Context) (domru.SIPCredentials, string, error) {
+		if fetches.Add(1) > 1 {
+			return domru.SIPCredentials{}, "", fmt.Errorf("503 no healthy upstream")
+		}
+		return domru.SIPCredentials{Login: "test", Password: "secret", Realm: peer.LocalAddr().String()}, "door", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); peer.Close(); <-done })
+	r := &rig{t: t, s: c, peer: peer, addr: addr, parser: sip.NewParser()}
+	reply := func(code sip.StatusCode) {
+		res := sip.NewResponseFromRequest(r.readRequest(sip.REGISTER), code, "x", nil)
+		res.AppendHeader(sip.NewHeader("Expires", "1"))
+		r.send(res.String())
+	}
+	reply(200)
+	require.Eventually(t, func() bool { return c.Status().State == "ready" }, time.Second, 10*time.Millisecond)
+	reply(503) // refresh after 0.8 s fails
+	reply(200) // retried with the cached credentials, the API is down
+	require.Eventually(t, func() bool { return c.Status().State == "ready" }, time.Second, 10*time.Millisecond)
+	require.EqualValues(t, 1, fetches.Load())
+	reply(403)
+	require.Eventually(t, func() bool { return fetches.Load() == 2 }, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, "waiting_auth", c.Status().State)
 }

@@ -65,7 +65,14 @@ type Client struct {
 	calls                         map[string]*call
 	ua                            *sipgo.UserAgent
 	client                        *sipgo.Client
+	// cred is the last answer of Fetch, reused while the registrar is merely
+	// unreachable: a Dom.ru API outage must not take SIP down with it. Only
+	// the register goroutine touches it.
+	cred     *domru.SIPCredentials
+	credName string
 }
+
+var retryDelay = 5 * time.Second // shortened in tests
 
 func New(cfg Config) (*Client, error) {
 	if net.ParseIP(cfg.IP).To4() == nil || net.ParseIP(cfg.IP).IsUnspecified() || cfg.Port < 1 || cfg.Port > 65535 {
@@ -223,17 +230,21 @@ func (s *Client) allowed(r *sip.Request) bool {
 }
 func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 	for ctx.Err() == nil {
-		s.setStatus("waiting_auth", "")
-		fetch, cancel := context.WithTimeout(ctx, 15*time.Second)
-		cred, name, err := s.Fetch(fetch)
-		cancel()
-		if err != nil {
-			s.setStatus("waiting_auth", "Unable to obtain SIP credentials or validate intercom")
-			if !pause(ctx, 30*time.Second) {
-				return
+		if s.cred == nil {
+			s.setStatus("waiting_auth", "")
+			fetch, cancel := context.WithTimeout(ctx, 15*time.Second)
+			cred, name, err := s.Fetch(fetch)
+			cancel()
+			if err != nil {
+				s.setStatus("waiting_auth", "Unable to obtain SIP credentials or validate intercom")
+				if !pause(ctx, 30*time.Second) {
+					return
+				}
+				continue
 			}
-			continue
+			s.cred, s.credName = &cred, name
 		}
+		cred, name := *s.cred, s.credName
 		var target sip.Uri
 		realm := cred.Realm
 		if !strings.HasPrefix(realm, "sip:") {
@@ -241,6 +252,7 @@ func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 		}
 		if sip.ParseUri(realm, &target) != nil || target.Host == "" || target.User != "" || strings.ContainsAny(cred.Login, "\r\n<>@ ") {
 			s.setStatus("error", "Invalid SIP credentials format")
+			s.cred = nil
 			if !pause(ctx, 30*time.Second) {
 				return
 			}
@@ -249,7 +261,7 @@ func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 		ips, err := net.DefaultResolver.LookupIPAddr(ctx, target.Host)
 		if err != nil {
 			s.setStatus("error", "Cannot resolve SIP registrar")
-			if !pause(ctx, 5*time.Second) {
+			if !pause(ctx, retryDelay) {
 				return
 			}
 			continue
@@ -303,6 +315,9 @@ func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 			}
 			if res.StatusCode != 200 {
 				s.setStatus("error", fmt.Sprintf("SIP registration returned %d", res.StatusCode))
+				if res.StatusCode == 401 || res.StatusCode == 403 || res.StatusCode == 404 {
+					s.cred = nil // the registrar rejects these credentials: ask the API again
+				}
 				break
 			}
 			ttl := expires
@@ -320,6 +335,7 @@ func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 			}
 			if ttl <= 0 {
 				s.setStatus("error", "SIP registration not granted")
+				s.cred = nil
 				break
 			}
 			s.setStatus("ready", "")
@@ -327,7 +343,7 @@ func (s *Client) register(ctx context.Context, cli *sipgo.Client) {
 				return
 			}
 		}
-		if !pause(ctx, 5*time.Second) {
+		if !pause(ctx, retryDelay) {
 			return
 		}
 	}
