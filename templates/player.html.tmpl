@@ -3,56 +3,86 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ if .TS }}Архив{{ else }}Камера{{ end }} {{ .Camera }}</title>
+    <title>Камера {{ .Camera }}</title>
     <style>
-        html, body { margin: 0; height: 100%; background: #000; }
-        body { display: flex; flex-direction: column; }
-        video { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
-        #bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; color: #eee; font: 14px sans-serif; }
-        #bar button, #bar input, #bar a { font: inherit; padding: 4px 8px; }
-        #bar a { color: #eee; }
-        #clock { min-width: 9em; font-variant-numeric: tabular-nums; }
+        html, body { margin: 0; height: 100%; background: #0d1117; }
+        body { display: flex; flex-direction: column; font: 600 15px -apple-system, system-ui, sans-serif; color: #fff; }
+        video { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; }
+        .row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px 4px; }
+        .pill { font: inherit; color: inherit; background: #161b22; border: 0; border-radius: 999px; padding: 7px 14px; }
+        #clock { background: #e5483d; font-variant-numeric: tabular-nums; }
+        #live .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border: 3px solid #e5483d; border-radius: 50%; vertical-align: -2px; }
+        #live.on .dot { background: #e5483d; }
+        #ruler { display: block; width: 100%; height: 64px; touch-action: pan-y; cursor: grab; }
     </style>
 </head>
 <body>
 <video id="v" playsinline controls disableremoteplayback></video>
-{{ if .TS }}
-<div id="bar">
-    <span id="clock"></span>
-    <button data-d="-600">−10 мин</button>
-    <button data-d="-60">−1 мин</button>
-    <button data-d="-10">−10 с</button>
-    <button data-d="10">+10 с</button>
-    <button data-d="60">+1 мин</button>
-    <button data-d="600">+10 мин</button>
-    <input id="at" type="datetime-local" step="1" aria-label="Перейти ко времени">
-    <a href="?{{ if .Light }}light=1{{ end }}">онлайн</a>
+<div class="row">
+    <select id="day" class="pill" aria-label="День"></select>
+    <span id="clock" class="pill"></span>
+    <button id="live" class="pill"><span class="dot"></span>Live</button>
 </div>
-{{ end }}
+<canvas id="ruler" aria-label="Шкала времени: потяните, чтобы перейти"></canvas>
 <script>
     var v = document.getElementById('v');
     var light = {{ .Light }};
     var aac = {{ .AAC }};
     var ts = {{ .TS }}; // archive start in unix seconds, 0 = live
     var depth = {{ .Depth }};
-    var params = [];
-    if (light) params.push('light=1');
-    if (ts) params.push('ts=' + ts);
-    var src = '/player/{{ .Camera }}/mp4' + (params.length ? '?' + params.join('&') : '');
-    var stop = new AbortController();
     // The server streams fragmented MP4 (fragments every 0.5 s). Browsers do
     // not play an endless MP4 from a plain src reliably (Safari never does), so
     // it is fed through Media Source Extensions: ManagedMediaSource is the
     // iPhone flavour (iOS 17.1+). Latency ends up ~2-3 s everywhere.
     var MS = window.ManagedMediaSource || window.MediaSource;
     var mime = 'video/mp4; codecs="avc1.4d002a, ' + (aac ? 'mp4a.40.2' : 'mp4a.6b') + '"';
-    if (MS && MS.isTypeSupported(mime)) {
+    var stop = new AbortController();
+    var base = null;     // media time of the first frame, which shows ts
+    var loading = true;  // a new stream has not started playing yet
+    var pausedAt = 0;
+
+    function now() { return Date.now() / 1000; }
+    function oldest() { return now() - depth + 60; } // older TS make the streamer hang
+    // clock is the moment on screen. ponytail: live is taken as ~3 s behind.
+    function clock() {
+        if (stop.signal.aborted) return pausedAt;
+        if (!ts) return now() - 3;
+        return base === null ? ts : ts + v.currentTime - base;
+    }
+
+    // start plays from unix time t; anything in the last 10 s is live. The
+    // archive arrives in real time, so every jump is a new request (~2-3 s).
+    function start(t) {
+        stop.abort();
+        stop = new AbortController();
+        ts = !t || t > now() - 10 ? 0 : Math.floor(Math.max(t, oldest()));
+        base = null;
+        loading = true;
+        var q = [];
+        if (light) q.push('light=1');
+        if (ts) q.push('ts=' + ts);
+        q = q.length ? '?' + q.join('&') : '';
+        history.replaceState(null, '', location.pathname + q);
+        var src = '/player/{{ .Camera }}/mp4' + q;
+        if (MS && MS.isTypeSupported(mime)) feed(src, stop.signal, !!ts);
+        else v.src = src; // ponytail: no MSE at all, let the browser try progressive playback
+        // Try to start with sound; browsers allow that only after a user gesture
+        // on the site, so fall back to a muted autoplay (tap the speaker to unmute).
+        v.play().catch(function () {
+            v.muted = true;
+            v.play().catch(function () {});
+        });
+        draw();
+    }
+
+    function feed(src, signal, archive) {
         var ms = new MS();
         v.src = URL.createObjectURL(ms);
         ms.addEventListener('sourceopen', function () {
+            URL.revokeObjectURL(v.src);
             var sb = ms.addSourceBuffer(mime);
             var queue = [];
-            var keep = ts ? 120 : 10; // seconds kept behind the playhead: the archive allows seeking back
+            var keep = archive ? 120 : 10; // seconds kept behind the playhead for seeking back
             function pump() {
                 if (sb.updating || ms.readyState !== 'open') return;
                 if (queue.length) {
@@ -62,7 +92,7 @@
                 }
             }
             sb.addEventListener('updateend', pump);
-            fetch(src, {signal: stop.signal}).then(function (res) {
+            fetch(src, {signal: signal}).then(function (res) {
                 if (!res.ok) throw new Error(res.status);
                 var reader = res.body.getReader();
                 function read() {
@@ -74,59 +104,102 @@
                     }).catch(function () {});
                 }
                 read();
-            }).catch(function (e) { if (!stop.signal.aborted) document.title = 'Поток недоступен (' + e.message + ')'; });
-            // Stay near the live edge if the player fell behind (tab in background).
-            if (!ts) setInterval(function () {
-                if (!v.buffered.length) return;
-                var end = v.buffered.end(v.buffered.length - 1);
-                if (end - v.currentTime > 3) v.currentTime = end - 1;
-            }, 1000);
-        });
-    } else {
-        v.src = src; // ponytail: no MSE at all, let the browser try progressive playback
+            }).catch(function (e) { if (!signal.aborted) document.title = 'Поток недоступен (' + e.message + ')'; });
+        }, {once: true});
     }
-    // Try to start with sound; browsers allow that only after a user gesture
-    // on the site, so fall back to a muted autoplay (tap the speaker to unmute).
-    v.play().catch(function () {
-        v.muted = true;
-        v.play().catch(function () {});
+
+    // Stay near the live edge if the player fell behind (tab in background).
+    setInterval(function () {
+        if (ts || v.paused || !v.buffered.length) return;
+        var end = v.buffered.end(v.buffered.length - 1);
+        if (end - v.currentTime > 3) v.currentTime = end - 1;
+    }, 1000);
+    // A paused stream would keep downloading in real time with nowhere to put
+    // it: drop it and resume from the same moment (live pauses into the archive).
+    v.addEventListener('playing', function () { loading = false; });
+    v.addEventListener('pause', function () {
+        if (loading) return;
+        pausedAt = clock();
+        stop.abort();
     });
-    if (ts) {
-        // The archive arrives in real time, so a jump is a new request from
-        // another TS (~2-3 s to the first frame); seeking back inside what
-        // already played stays in the <video> buffer.
-        var base = null; // media time of the first frame = ts
-        var now = function () { return Math.floor(Date.now() / 1000); };
-        var clock = function () { return base === null ? ts : ts + Math.floor(v.currentTime - base); };
-        var local = function (t) { // datetime-local wants local time without a zone
-            var d = new Date(t * 1000);
-            d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-            return d.toISOString().slice(0, 19);
-        };
-        var go = function (t) {
-            t = Math.max(now() - depth + 60, Math.min(t, now() - 10)); // older hangs, newer falls back to live
-            location.replace('?ts=' + t + (light ? '&light=1' : ''));
-        };
-        var at = document.getElementById('at');
-        at.value = local(ts);
-        at.min = local(now() - depth + 60);
-        at.max = local(now());
-        at.addEventListener('change', function () {
-            var t = Math.floor(new Date(at.value).getTime() / 1000);
-            if (t) go(t);
-        });
-        document.querySelectorAll('#bar button').forEach(function (b) {
-            b.addEventListener('click', function () { go(clock() + Number(b.dataset.d)); });
-        });
-        setInterval(function () {
-            if (base === null && v.buffered.length) base = v.buffered.start(0);
-            document.getElementById('clock').textContent = new Date(clock() * 1000).toLocaleString('ru-RU');
-        }, 500);
-        // A paused archive would keep downloading in real time with nowhere to
-        // put it; drop the stream and resume from the same moment on play.
-        v.addEventListener('pause', function () { stop.abort(); });
-        v.addEventListener('play', function () { if (stop.signal.aborted) go(clock()); });
+    v.addEventListener('play', function () { if (stop.signal.aborted) start(pausedAt); });
+
+    // Ruler: the time under the red line in the middle is what plays. Drag it
+    // or tap a spot to jump; the day picker keeps the time of day.
+    var cv = document.getElementById('ruler'), cx = cv.getContext('2d');
+    var clockEl = document.getElementById('clock'), day = document.getElementById('day');
+    var pxPerSec = 0;        // set by draw: ~3 h across any screen, a tick every 5 min
+    var drag = null;         // {x, from, t} while the ruler is dragged
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var dayLabel = function (d) {
+        var s = d.toLocaleDateString('ru-RU', {weekday: 'short', day: 'numeric'});
+        return s.charAt(0).toUpperCase() + s.slice(1);
+    };
+    var midnight = function (t) { var d = new Date(t * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
+    function shown() { return drag ? drag.t : clock(); }
+    function draw() {
+        if (base === null && ts && v.buffered.length) base = v.buffered.start(0);
+        var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+        pxPerSec = w / (3 * 3600);
+        if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+        cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        cx.clearRect(0, 0, w, h);
+        var at = shown(), n = now(), lo = oldest(), half = w / 2 / pxPerSec;
+        cx.font = '500 13px -apple-system, system-ui, sans-serif';
+        cx.textAlign = 'left';
+        for (var t = Math.floor((at - half) / 300) * 300; t <= at + half; t += 300) {
+            var x = w / 2 + (t - at) * pxPerSec, d = new Date(t * 1000), hour = d.getMinutes() === 0;
+            var off = t > n || t < lo;
+            cx.fillStyle = off ? '#2b3038' : '#fff';
+            cx.fillRect(x - 1, 4, 2, hour ? 34 : 24);
+            if (hour) {
+                cx.fillStyle = off ? '#2b3038' : '#9aa0a6';
+                cx.fillText(d.getHours() === 0 ? dayLabel(d) : pad(d.getHours()) + ':00', x + 6, h - 8);
+            }
+        }
+        cx.fillStyle = '#e5483d';
+        cx.fillRect(w / 2 - 1.5, 0, 3, h - 18);
+        var d = new Date(at * 1000);
+        clockEl.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        if (document.activeElement !== day) {
+            if (Number(day.options[0].value) !== midnight(n)) fillDays(); // a new day began
+            day.value = String(midnight(at));
+        }
+        document.getElementById('live').classList.toggle('on', !ts && !drag);
     }
+    function fillDays() {
+        day.textContent = '';
+        for (var m = midnight(now()); m >= midnight(oldest()); m = midnight(m - 43200)) {
+            day.add(new Option(dayLabel(new Date(m * 1000)), String(m)));
+        }
+    }
+    cv.addEventListener('pointerdown', function (e) {
+        drag = {x: e.clientX, from: clock(), t: clock()};
+        cv.setPointerCapture(e.pointerId);
+    });
+    cv.addEventListener('pointermove', function (e) {
+        if (!drag) return;
+        drag.t = Math.min(now(), Math.max(oldest(), drag.from - (e.clientX - drag.x) / pxPerSec));
+        draw();
+    });
+    cv.addEventListener('pointerup', function (e) {
+        if (!drag) return;
+        var t = Math.abs(e.clientX - drag.x) > 3 ? drag.t
+            : drag.from + (e.clientX - cv.getBoundingClientRect().left - cv.clientWidth / 2) / pxPerSec;
+        drag = null;
+        start(t);
+    });
+    cv.addEventListener('pointercancel', function () { drag = null; draw(); });
+    day.addEventListener('change', function () {
+        var at = shown();
+        start(Number(day.value) + (at - midnight(at)));
+        day.blur();
+    });
+    document.getElementById('live').addEventListener('click', function () { start(0); });
+    window.addEventListener('resize', draw);
+    setInterval(draw, 250);
+    fillDays();
+    start(ts);
 </script>
 </body>
 </html>

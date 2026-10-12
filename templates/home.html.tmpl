@@ -73,8 +73,8 @@
         img { max-width: 100%; height: auto; }
         h1 { font-size: 1.4em; }
         h2 { font-size: 1.1em; }
-        .archive { margin: 12px 0; }
-        .archive iframe { display: block; width: 100%; aspect-ratio: 16 / 11; border: 0; margin-top: 8px; background: #000; }
+        .archive { margin: 12px 0; container-type: inline-size; }
+        .archive iframe { display: block; width: 100%; height: calc(56.25cqw + 120px); border: 0; margin-top: 8px; background: #0d1117; }
     </style>
 </head>
 <body>
@@ -141,7 +141,7 @@
         </div>
         {{ if .StreamURL }}
         <details class="archive" data-camera="{{ .ID }}">
-            <summary>Архив за 3 суток</summary>
+            <summary>Камера и архив за 3 суток</summary>
         </details>
         {{ end }}
         {{ if or .StreamURL .SnapshotURL .OpenDoorURL }}
@@ -205,13 +205,14 @@ function setVideo() {
         .catch(e => { document.getElementById('video-error').textContent = ' ⚠️ ' + e.message; setTimeout(showIntegrations, 3000); });
 }
 showIntegrations();
-// The archive player streams only while its spoiler is open.
+// The player streams only while its spoiler is open; it starts live and its
+// ruler drags back into the archive.
 document.querySelectorAll('details.archive').forEach(d => d.addEventListener('toggle', () => {
     d.querySelector('iframe')?.remove();
     if (!d.open) return;
     const f = document.createElement('iframe');
     f.allow = 'autoplay; fullscreen';
-    f.src = '/player/' + d.dataset.camera + '?ts=' + (Math.floor(Date.now() / 1000) - 300);
+    f.src = '/player/' + d.dataset.camera;
     d.append(f);
 }));
 setInterval(showIntegrations, 10000);

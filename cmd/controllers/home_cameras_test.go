@@ -275,8 +275,8 @@ func TestPlayerArchive(t *testing.T) {
 		Depth  int64
 	}{301, false, true, 1760173200, 259200})
 	require.Regexp(t, `var ts =\s+1760173200\s*;`, html)
-	require.Contains(t, html, `id="bar"`)
-	require.Contains(t, html, `data-d="-600"`)
+	require.Contains(t, html, `<canvas id="ruler"`)
+	require.Contains(t, html, "start(ts);")
 
 	now := time.Now().Unix()
 	for q, ok := range map[string]bool{
