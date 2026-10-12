@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	pagemodels "github.com/moleus/domru/cmd/models"
 	"github.com/moleus/domru/pkg/domru"
@@ -252,7 +254,9 @@ func TestPlayerPagePicksHLSOrMP4(t *testing.T) {
 		Camera int
 		Light  bool
 		AAC    bool
-	}{301, true, true})
+		TS     int64
+		Depth  int64
+	}{301, true, true, 0, 259200})
 	require.Contains(t, html, "window.ManagedMediaSource || window.MediaSource")
 	require.Contains(t, html, "/player/301/mp4")
 	require.NotContains(t, html, "Format=HLS")
@@ -260,4 +264,30 @@ func TestPlayerPagePicksHLSOrMP4(t *testing.T) {
 	require.Regexp(t, `var aac =\s+true\s*;`, html)
 	require.Contains(t, html, `<video id="v" playsinline controls disableremoteplayback>`)
 	require.Contains(t, html, "v.muted = true;")
+}
+
+func TestPlayerArchive(t *testing.T) {
+	html := renderTestTemplate(t, "player", struct {
+		Camera int
+		Light  bool
+		AAC    bool
+		TS     int64
+		Depth  int64
+	}{301, false, true, 1760173200, 259200})
+	require.Regexp(t, `var ts =\s+1760173200\s*;`, html)
+	require.Contains(t, html, `id="bar"`)
+	require.Contains(t, html, `data-d="-600"`)
+
+	now := time.Now().Unix()
+	for q, ok := range map[string]bool{
+		"":                                    true,
+		"ts=" + strconv.FormatInt(now-60, 10): true,
+		"ts=" + strconv.FormatInt(now-71*3600, 10): true,
+		"ts=" + strconv.FormatInt(now-73*3600, 10): false,
+		"ts=" + strconv.FormatInt(now+60, 10):      false,
+		"ts=abc":                                   false,
+	} {
+		_, err := archiveTS(httptest.NewRequest(http.MethodGet, "/player/301?"+q, nil))
+		require.Equal(t, ok, err == nil, q)
+	}
 }
