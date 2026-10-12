@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os/exec"
 	"testing"
+	"time"
 
 	flv "github.com/yapingcat/gomedia/go-flv"
 )
@@ -119,7 +120,7 @@ func TestTranscodeReencodesAudioToAAC(t *testing.T) {
 	}
 	in := realFLV(t)
 	var out bytes.Buffer
-	err := Transcode(context.Background(), &out, bytes.NewReader(in))
+	err := Transcode(context.Background(), &out, bytes.NewReader(in), 0)
 	if err == nil || err.Error() != "live stream ended" {
 		t.Fatalf("err = %v", err)
 	}
@@ -134,7 +135,15 @@ func TestTranscodeReencodesAudioToAAC(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := Transcode(ctx, &out, bytes.NewReader(in)); err != context.Canceled {
+	if err := Transcode(ctx, &out, bytes.NewReader(in), 0); err != context.Canceled {
 		t.Fatalf("cancelled: %v", err)
+	}
+	// A download stops after d of media and is not an error.
+	out.Reset()
+	if err := Transcode(context.Background(), &out, bytes.NewReader(in), time.Second); err != nil {
+		t.Fatalf("limited: %v", err)
+	}
+	if full := len(b); out.Len() == 0 || out.Len() > full*2/3 {
+		t.Fatalf("1 s of 3 s gave %d of %d bytes", out.Len(), full)
 	}
 }

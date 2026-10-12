@@ -3,6 +3,7 @@ package controllers
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
@@ -288,6 +289,19 @@ func TestPlayerArchive(t *testing.T) {
 		"ts=abc":                                   false,
 	} {
 		_, err := archiveTS(httptest.NewRequest(http.MethodGet, "/player/301?"+q, nil))
+		require.Equal(t, ok, err == nil, q)
+	}
+
+	for q, ok := range map[string]bool{
+		fmt.Sprintf("from=%d&to=%d", now-600, now-300):            true,
+		fmt.Sprintf("from=%d&to=%d", now-3600, now-1800):          true,
+		fmt.Sprintf("from=%d&to=%d", now-3600, now-1799):          false, // over 30 min
+		fmt.Sprintf("from=%d&to=%d", now-300, now-600):            false,
+		fmt.Sprintf("from=%d&to=%d", now-300, now-300):            false,
+		fmt.Sprintf("to=%d", now-300):                             false,
+		fmt.Sprintf("from=%d&to=%d", now-73*3600, now-73*3600+60): false,
+	} {
+		_, _, err := downloadRange(httptest.NewRequest(http.MethodGet, "/player/301/download?"+q, nil))
 		require.Equal(t, ok, err == nil, q)
 	}
 }

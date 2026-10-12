@@ -119,6 +119,7 @@ func main() {
 	http.HandleFunc("GET /stream/{cameraId}", handlers.StreamController)
 	http.HandleFunc("GET /player/{cameraId}", handlers.PlayerPageController)
 	http.HandleFunc("GET /player/{cameraId}/mp4", handlers.PlayerController)
+	http.HandleFunc("GET /player/{cameraId}/download", handlers.DownloadController)
 	http.HandleFunc("GET /pages/home.html", checkCredentialsMiddleware(credentialsStore, handlers.HomeHandler))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

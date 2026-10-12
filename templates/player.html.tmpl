@@ -8,7 +8,11 @@
         html, body { margin: 0; height: 100%; background: #0d1117; }
         body { display: flex; flex-direction: column; font: 600 15px -apple-system, system-ui, sans-serif; color: #fff; }
         video { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; }
-        .row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px 4px; }
+        .row { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 8px 12px 4px; }
+        .row[hidden] { display: none; }
+        #cut { justify-content: flex-start; flex-wrap: wrap; }
+        #dl { text-decoration: none; }
+        #dl:not([href]) { color: #9aa0a6; }
         .pill { font: inherit; color: inherit; background: #161b22; border: 0; border-radius: 999px; padding: 7px 14px; }
         #clock { background: #e5483d; font-variant-numeric: tabular-nums; }
         #live .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border: 3px solid #e5483d; border-radius: 50%; vertical-align: -2px; }
@@ -21,7 +25,15 @@
 <div class="row">
     <select id="day" class="pill" aria-label="День"></select>
     <span id="clock" class="pill"></span>
-    <button id="live" class="pill"><span class="dot"></span>Live</button>
+    <span>
+        <button id="cut-toggle" class="pill" aria-label="Скачать интервал" title="Скачать интервал">⬇</button>
+        <button id="live" class="pill"><span class="dot"></span>Live</button>
+    </span>
+</div>
+<div class="row" id="cut" hidden>
+    <button id="mark-from" class="pill">Начало <span id="from-t"></span></button>
+    <button id="mark-to" class="pill">Конец <span id="to-t"></span></button>
+    <a id="dl" class="pill"></a>
 </div>
 <canvas id="ruler" aria-label="Шкала времени: потяните, чтобы перейти"></canvas>
 <script>
@@ -137,6 +149,46 @@
     };
     var midnight = function (t) { var d = new Date(t * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
     function shown() { return drag ? drag.t : clock(); }
+    var hms = function (t) { var d = new Date(t * 1000); return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); };
+
+    // Download: marks at the moment under the red line. The archive arrives in
+    // real time, so the file takes about as long as the interval.
+    var cutRow = document.getElementById('cut'), dl = document.getElementById('dl');
+    var cut = {from: 0, to: 0};
+    function showCut() {
+        cut.to = Math.min(cut.to, Math.floor(now()) - 10);
+        document.getElementById('from-t').textContent = cut.from ? hms(cut.from) : '';
+        document.getElementById('to-t').textContent = cut.to ? hms(cut.to) : '';
+        var d = cut.to - cut.from;
+        if (d > 0 && d <= 1800) {
+            dl.href = '/player/{{ .Camera }}/download?from=' + cut.from + '&to=' + cut.to;
+            var begin = new Date(cut.from * 1000);
+            dl.download = 'domru-' + begin.getFullYear() + pad(begin.getMonth() + 1) + pad(begin.getDate()) + '-' + hms(cut.from).replace(/:/g, '') + '.mp4';
+            dl.textContent = 'Скачать ' + Math.floor(d / 60) + ':' + pad(d % 60) + ' (~' + Math.ceil(d / 60) + ' мин)';
+        } else {
+            dl.removeAttribute('href');
+            dl.textContent = d > 1800 ? 'Не больше 30 мин' : 'Конец раньше начала';
+        }
+        draw();
+    }
+    document.getElementById('cut-toggle').addEventListener('click', function () {
+        cutRow.hidden = !cutRow.hidden;
+        if (!cutRow.hidden && !cut.from) {
+            cut.from = Math.floor(shown());
+            cut.to = cut.from + 60;
+        }
+        showCut();
+    });
+    document.getElementById('mark-from').addEventListener('click', function () {
+        var d = cut.to - cut.from;
+        cut.from = Math.floor(shown());
+        if (cut.to <= cut.from) cut.to = cut.from + (d > 0 ? d : 60);
+        showCut();
+    });
+    document.getElementById('mark-to').addEventListener('click', function () {
+        cut.to = Math.floor(shown());
+        showCut();
+    });
     function draw() {
         if (base === null && ts && v.buffered.length) base = v.buffered.start(0);
         var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
@@ -145,6 +197,10 @@
         cx.setTransform(dpr, 0, 0, dpr, 0, 0);
         cx.clearRect(0, 0, w, h);
         var at = shown(), n = now(), lo = oldest(), half = w / 2 / pxPerSec;
+        if (!cutRow.hidden && cut.to > cut.from) { // the interval to download
+            cx.fillStyle = 'rgba(229, 72, 61, .35)';
+            cx.fillRect(w / 2 + (cut.from - at) * pxPerSec, 0, (cut.to - cut.from) * pxPerSec, h - 18);
+        }
         cx.font = '500 13px -apple-system, system-ui, sans-serif';
         cx.textAlign = 'left';
         for (var t = Math.floor((at - half) / 300) * 300; t <= at + half; t += 300) {
@@ -159,8 +215,7 @@
         }
         cx.fillStyle = '#e5483d';
         cx.fillRect(w / 2 - 1.5, 0, 3, h - 18);
-        var d = new Date(at * 1000);
-        clockEl.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        clockEl.textContent = hms(at);
         if (document.activeElement !== day) {
             if (Number(day.options[0].value) !== midnight(n)) fillDays(); // a new day began
             day.value = String(midnight(at));

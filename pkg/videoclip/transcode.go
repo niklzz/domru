@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // FFmpeg is the ffmpeg binary found on PATH at startup, or "" when absent:
@@ -16,21 +18,27 @@ var FFmpeg, _ = exec.LookPath("ffmpeg")
 // Transcode remuxes a live FLV stream into fragmented MP4 like Play, but
 // through ffmpeg: video is copied, MP3 audio is re-encoded to AAC so Safari
 // and iPhones get sound. Fragments every 0.5 s keep the latency low. It
-// returns when r ends, ctx is cancelled or w stops accepting data.
-func Transcode(ctx context.Context, w io.Writer, r io.Reader) error {
+// returns when r ends, ctx is cancelled or w stops accepting data; with d > 0
+// it stops after d of media and returns nil (an archive download).
+func Transcode(ctx context.Context, w io.Writer, r io.Reader, d time.Duration) error {
 	if FFmpeg == "" {
 		return errors.New("ffmpeg not installed")
 	}
-	cmd := exec.CommandContext(ctx, FFmpeg,
-		"-hide_banner", "-loglevel", "error", "-nostdin",
+	var limit []string
+	if d > 0 {
+		limit = []string{"-t", strconv.FormatFloat(d.Seconds(), 'f', 3, 64)}
+	}
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin",
 		// Live input: probe 0.5 s instead of the default 5 s. Audio follows the
 		// first (200 KB) keyframe, so probesize must cover more than that.
 		"-fflags", "+nobuffer", "-analyzeduration", "500000", "-probesize", "2000000",
 		"-f", "flv", "-i", "pipe:0",
 		"-c:v", "copy",
-		"-c:a", "aac", "-b:a", "96k",
+		"-c:a", "aac", "-b:a", "96k"}
+	args = append(append(args, limit...),
 		"-f", "mp4", "-movflags", "+empty_moov+default_base_moof", "-frag_duration", "500000",
 		"pipe:1")
+	cmd := exec.CommandContext(ctx, FFmpeg, args...)
 	cmd.Stdin = r
 	cmd.Stdout = &streamWriter{w: w}
 	var stderr bytes.Buffer
@@ -45,6 +53,9 @@ func Transcode(ctx context.Context, w io.Writer, r io.Reader) error {
 			return errors.New("ffmpeg: " + lastLine(msg))
 		}
 		return errors.New("ffmpeg failed")
+	}
+	if d > 0 {
+		return nil
 	}
 	return errors.New("live stream ended")
 }
